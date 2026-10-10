@@ -401,7 +401,16 @@ def worker(state: State, geom: str, rx: int, ry: int, rw: int, rh: int, stop: th
     # result is stale and must be discarded.
     ocr_frame_version = 0
 
+    active_translator = translator()
     while not stop.is_set() and os.path.exists(_lock_paths()[0]):
+        if active_translator is not translator():
+            active_translator = translator()
+            cache.clear()
+            tracked.clear()
+            last_key = ""
+            last_clean = None
+            last_dirty = None
+            last_full_ocr = 0.0
         if frame_sum.dirty:
             frame_sum.emit()
             frame_sum = watch_mod.FrameSummary()
@@ -580,9 +589,9 @@ def worker(state: State, geom: str, rx: int, ry: int, rw: int, rh: int, stop: th
         # is overwritten. The OCR worker will pick up the latest.
         frame_queue.put(region_img)
         if region_img is None:
-            if not hold_hidden:
-                state.show()
-            time.sleep(loop_sleep)
+            state.set_status("Захват недоступен: " + (captured.error or "кадр не получен"))
+            state.show()
+            stop.wait(loop_sleep)
             continue
         if hold_hidden:
             tlog("hold-hidden until set")

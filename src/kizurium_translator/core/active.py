@@ -21,6 +21,8 @@ class Active:
     def __init__(self) -> None:
         self.target_lang = "ru"
         self.ocr_engines: tuple[str,...] = ("rapid", "meiki", "tesseract")
+        self.ocr_language = "auto"
+        self.ocr_options = {}
         self.card_bg = (0.05, 0.07, 0.12, 0.55)
         self.card_fg = (1.0, 1.0, 1.0, 1.0)
         self.card_radius = 7.0
@@ -60,6 +62,8 @@ def card_radius() -> float:
 
 def apply_frame(config: Any) -> None:
     """Движки и карточка. Язык назначения пишет только `set_target_language`."""
+    _ACTIVE.ocr_language = getattr(config, "ocr_language", "auto")
+    _ACTIVE.ocr_options = dict(getattr(config, "ocr_options", {}))
     engines = tuple(str(v) for v in config.ocr_engines)
     if engines:
         _ACTIVE.ocr_engines = engines

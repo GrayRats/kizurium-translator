@@ -87,7 +87,6 @@ packages = ["src/kizurium_translator"]
 # are what the overlay measures against, and a wheel without them draws in
 # whatever the machine it was installed on happened to have.
 artifacts = [
-  "src/kizurium_translator/qml/**",
   "src/kizurium_translator/fonts/*.ttf",
   "src/kizurium_translator/fonts/LICENSE-OFL.txt",
   "src/kizurium_translator/data/lexicons/**",

@@ -36,7 +36,7 @@ def main_for_cli(geom: str) -> int:
     return main(["--geom", geom])
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, application=None):
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--geom", required=True, help="region as 'x,y WxH'")
@@ -48,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     TRANSLATION.disabled = bool(args.no_translate)
+
+    if LayerShell is None or not LayerShell.is_supported():
+        raise RuntimeError("Для наложения перевода нужен Wayland compositor с layer-shell")
 
     rx, ry, rw, rh = parse_geom(args.geom)
     geom = args.geom
@@ -94,16 +97,21 @@ def main(argv: list[str] | None = None) -> int:
             worker(state, geom, rx, ry, rw, rh, stop)
         except Exception as exc:
             tlog(f"worker-FATAL {type(exc).__name__}: {exc}")
+            state.set_status(f"OCR остановлен: {type(exc).__name__}: {exc}")
+            state.show()
             import traceback
 
             traceback.print_exc()
 
-    threading.Thread(target=_worker_wrap, daemon=True).start()
+    worker_thread = threading.Thread(target=_worker_wrap, daemon=True, name="live-ocr")
+    worker_thread.start()
+    windows = []
+    stopped = False
 
     # UNIQUE: второй процесс не рисует ещё один fullscreen-слой поверх
     from gi.repository import Gio
 
-    app = Gtk.Application(
+    app = application or Gtk.Application(
         application_id=APP_ID_OVERLAY,
         flags=Gio.ApplicationFlags.FLAGS_NONE,
     )
@@ -137,13 +145,16 @@ def main(argv: list[str] | None = None) -> int:
         return None
 
     def on_activate(_app: Gtk.Application) -> None:
-        if _app.get_windows():
+        if windows:
             return
         win = Gtk.ApplicationWindow(application=app)
+        windows.append(win)
         win.set_title("KizuriumTranslatorOverlay")
         win.set_decorated(False)
 
         LayerShell.init_for_window(win)
+        if not LayerShell.is_layer_window(win):
+            raise RuntimeError("Не удалось создать layer-shell окно перевода")
         # Какой выход занимает окно. Без этого GTK4 выбирает первый, и при двух
         # мониторах перевод области со второго экрана уезжал на первый: он
         # вычислялся верно, но был не виден нигде.
@@ -235,6 +246,12 @@ def main(argv: list[str] | None = None) -> int:
             # cached separately; here we only avoid queue_draw when
             # state.rev did not move.
             blocks, region, status = state.snapshot()
+            if not state.hidden and not status and not blocks:
+                tr = TRANSLATION.translator
+                if getattr(tr, "offline_only", False) and getattr(tr, "explicit_provider", False) and getattr(tr, "provider_id", "") != "bergamot":
+                    status = "Перевод отключён: выбран онлайн-сервис, но включён автономный режим. Откройте Настройки."
+                elif getattr(tr, "status", "") not in {"Ready", "Готово"}:
+                    status = getattr(tr, "status", "")
             draw_blocks(cr, blocks, region, status)
             state.mark_painted()
 
@@ -245,13 +262,21 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
-        last_rev = {"n": -1}
+        last_rev = {"n": -1, "translation_status": ""}
 
         def tick() -> bool:
-            if not os.path.exists(lock):
-                stop.set()
-                app.quit()
+            if stopped or not os.path.exists(lock):
+                close()
+                if application is None:
+                    app.quit()
                 return False
+            tr = TRANSLATION.translator
+            note = getattr(tr, "status", "")
+            if getattr(tr, "offline_only", False) and getattr(tr, "explicit_provider", False) and getattr(tr, "provider_id", "") != "bergamot":
+                note = "Перевод отключён: выбран онлайн-сервис, но включён автономный режим. Откройте Настройки."
+            if note != last_rev["translation_status"]:
+                last_rev["translation_status"] = note
+                state.set_status("" if note in {"Ready", "Готово"} else note)
             # queue_draw only when state revision advanced.
             rev = state.version()
             if rev != last_rev["n"]:
@@ -271,24 +296,38 @@ def main(argv: list[str] | None = None) -> int:
         win.present()
         GLib.idle_add(on_mapped)
 
-    app.connect("activate", on_activate)
-    try:
-        return app.run([sys.argv[0]])
-    except KeyboardInterrupt:
-        # Ctrl+C via gi's sigint fallback: quit cleanly, no traceback dump.
-        return 130
-    finally:
+    def close():
+        nonlocal stopped
+        if stopped:
+            return
+        stopped = True
         stop.set()
-        shutdown()
+        from ..translation.scheduler import SCHEDULER
+        SCHEDULER.bump()
+        for window in windows:
+            window.destroy()
+        windows.clear()
+        if TRANSLATION.translator is not None:
+            TRANSLATION.translator.cancel_pending()
         for path in (lock, pidfile):
             try:
                 os.remove(path)
             except OSError:
                 pass
-        try:
-            os.close(lock_fd)
-        except OSError:
-            pass
+        os.close(lock_fd)
+
+    if application is not None:
+        on_activate(application)
+        return {"close": close, "thread": worker_thread, "state": state, "stop": stop}
+    app.connect("activate", on_activate)
+    try:
+        return app.run([sys.argv[0]])
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        close()
+        shutdown()
+        worker_thread.join(timeout=5)
 
 
 if __name__ == "__main__":

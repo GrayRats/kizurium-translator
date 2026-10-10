@@ -264,6 +264,12 @@ Options (optional; most people never need them):
   --extras "a b"      rapid | meiki | deep-translate | local-mt | all
   --offline-packs     also download en→ru / ja→ru CT2 models (~160 MB)
   --no-offline-packs  skip offline models (default in express / --yes)
+  --bergamot "en-ru"  also install Bergamot local translation: model(s) from Mozilla's
+                      verified repository (+ native binding when a wheel exists)
+  --no-bergamot       skip Bergamot
+  --paddle            also install PaddleOCR (heavy; models are set up in Settings)
+  --update            re-run with the choices saved by the last install: sync the
+                      package, refresh the shortcut, re-verify and repair models
   --meiki             include Meiki OCR (default in express / --yes)
   --no-meiki          skip Japanese Meiki OCR
   --prefix DIR        command install prefix (default: $PREFIX)
@@ -283,6 +289,10 @@ PURGE=0
 CLEAN_CACHE=0
 OFFLINE_PACKS=ask
 MEIKI=ask
+BERGAMOT_PAIRS=""
+BERGAMOT=ask
+PADDLE=ask
+UPDATE=0
 ASSUME_YES=0
 INTERACTIVE_MENU=1
 
@@ -291,6 +301,10 @@ while [[ $# -gt 0 ]]; do
         --extras)            EXTRAS="$2"; INTERACTIVE_MENU=0; shift 2 ;;
         --offline-packs)     OFFLINE_PACKS=yes; INTERACTIVE_MENU=0; shift ;;
         --no-offline-packs)  OFFLINE_PACKS=no; INTERACTIVE_MENU=0; shift ;;
+        --bergamot)          BERGAMOT=yes; BERGAMOT_PAIRS="$2"; INTERACTIVE_MENU=0; shift 2 ;;
+        --no-bergamot)       BERGAMOT=no; BERGAMOT_PAIRS=""; INTERACTIVE_MENU=0; shift ;;
+        --paddle)            PADDLE=yes; INTERACTIVE_MENU=0; shift ;;
+        --update)            UPDATE=1; INTERACTIVE_MENU=0; shift ;;
         --meiki)             MEIKI=yes; INTERACTIVE_MENU=0; shift ;;
         --no-meiki)          MEIKI=no; INTERACTIVE_MENU=0; shift ;;
         --prefix)            PREFIX="$2"; shift 2 ;;
@@ -304,6 +318,8 @@ while [[ $# -gt 0 ]]; do
             # Games path: Meiki on; online translate works without HF packs.
             [[ "$MEIKI" == ask ]] && MEIKI=yes
             [[ "$OFFLINE_PACKS" == ask ]] && OFFLINE_PACKS=no
+            [[ "$BERGAMOT" == ask ]] && BERGAMOT=no
+            [[ "$PADDLE" == ask ]] && PADDLE=no
             shift
             ;;
         --uninstall)         UNINSTALL=1; shift ;;
@@ -320,8 +336,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYS_PKGS=(
     grim
     slurp                # --output / monitor pick; also grim helpers
-    quickshell
     wl-clipboard
+    gst-plugins-base     # screen capture through the ScreenCast portal (KDE)
+    gst-plugin-pipewire
+    xdg-desktop-portal
     tesseract
     tesseract-data-eng
     tesseract-data-rus
@@ -337,9 +355,26 @@ SYS_PKGS=(
     aria2                # multi-conn HF pack downloads (≈50–100× vs urllib)
 )
 
+# KDE answers ScreenCast through its own portal backend.
+[[ "${XDG_CURRENT_DESKTOP:-}" == *KDE* ]] && SYS_PKGS+=(xdg-desktop-portal-kde)
+
 if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
     . /etc/os-release
+fi
+
+# --update: the choices of the last install, no questions.
+if ((UPDATE)); then
+    if [[ ! -r "$STATE_DIR/install-options" ]]; then
+        err "нет сохранённых опций ($STATE_DIR/install-options): сначала обычная установка ./install.sh"
+        exit 1
+    fi
+    # shellcheck disable=SC1091
+    . "$STATE_DIR/install-options"
+    ASSUME_YES=1
+    INTERACTIVE_MENU=0
+    INSTALL_OPTS_SET=1
+    [[ -n "$BERGAMOT_PAIRS" ]] && BERGAMOT=yes
 fi
 
 detect_distro() {
@@ -470,6 +505,10 @@ do_uninstall() {
         rm -rf "$VENV_DIR"
         ok "удалён $VENV_DIR"
     fi
+    local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+    rm -f "$data_home/applications/kizurium-translator.desktop" \
+          "$data_home/icons/hicolor/256x256/apps/kizurium-translator.png" "$STATE_DIR/install-options"
+    have update-desktop-database && update-desktop-database "$data_home/applications" >/dev/null 2>&1 || true
     # drop empty data dir if nothing else left
     rmdir "$STATE_DIR" 2>/dev/null || true
 
@@ -665,16 +704,20 @@ if ((INTERACTIVE_MENU)) && is_tty && ((ASSUME_YES == 0)); then
             install)
                 # «Назад в меню» → checklist fails → loop, not exit.
                 if ! checklist \
-                    "system|1|Системные пакеты (grim, gtk4-layer-shell, tesseract, quickshell …)" \
+                    "system|1|Системные пакеты (gtk4-layer-shell, tesseract, GStreamer/PipeWire для захвата …)" \
                     "meiki|1|Meiki OCR — японские игры" \
-                    "packs|0|Offline language packs en→ru / ja→ru (~160 МБ HF)"; then
+                    "packs|0|Offline language packs en→ru / ja→ru (~160 МБ HF)" \
+                    "bergamot|0|Bergamot: локальная модель en→ru из репозитория Mozilla (~34 МБ)" \
+                    "paddle|0|PaddleOCR — тяжёлый движок (модели настраиваются в Настройках)"; then
                     continue
                 fi
                 if checklist_has system; then WITH_SYSTEM=yes; else WITH_SYSTEM=no; fi
                 if checklist_has meiki; then MEIKI=yes; else MEIKI=no; fi
                 if checklist_has packs; then OFFLINE_PACKS=yes; else OFFLINE_PACKS=no; fi
+                if checklist_has bergamot; then BERGAMOT=yes; BERGAMOT_PAIRS="${BERGAMOT_PAIRS:-en-ru}"; else BERGAMOT=no; BERGAMOT_PAIRS=""; fi
+                if checklist_has paddle; then PADDLE=yes; else PADDLE=no; fi
                 INSTALL_OPTS_SET=1
-                ok "выбрано: system=$WITH_SYSTEM  meiki=$MEIKI  offline-packs=$OFFLINE_PACKS"
+                ok "выбрано: system=$WITH_SYSTEM  meiki=$MEIKI  offline-packs=$OFFLINE_PACKS  bergamot=${BERGAMOT_PAIRS:-нет}  paddle=$PADDLE"
                 echo
                 break
                 ;;
@@ -685,7 +728,9 @@ if ((INTERACTIVE_MENU)) && is_tty && ((ASSUME_YES == 0)); then
         esac
     done
 elif ((ASSUME_YES)); then
-    [[ "$WITH_SYSTEM" == ask ]] && WITH_SYSTEM=yes
+    [[ "$BERGAMOT" == ask ]] && BERGAMOT=no
+    [[ "$PADDLE" == ask ]] && PADDLE=no
+    [[ "$WITH_SYSTEM" == ask ]] && { ((UPDATE)) || WITH_SYSTEM=yes; }
     [[ "$MEIKI" == ask ]] && MEIKI=yes
     [[ "$OFFLINE_PACKS" == ask ]] && OFFLINE_PACKS=no
     INSTALL_OPTS_SET=1
@@ -908,7 +953,8 @@ else
 fi
 
 if [[ -x "$VENV_DIR/bin/python" ]]; then
-    if ! "$VENV_DIR/bin/python" -c "import sysconfig; sys.exit(0 if sysconfig.get_config_var('WITH_SYSTEM_SITE_PACKAGES') else 1)" 2>/dev/null; then
+    # pyvenv.cfg is what says whether the system's PyGObject stays importable.
+    if ! grep -qiE '^include-system-site-packages *= *true' "$VENV_DIR/pyvenv.cfg" 2>/dev/null; then
         warn "существующее окружение без system-site-packages — пересоздаю"
         rm -rf "$VENV_DIR"
         uv venv --python "$PYVER" --system-site-packages "$VENV_DIR" >/dev/null
@@ -966,6 +1012,84 @@ if [[ "$OFFLINE_PACKS" == yes ]]; then
     fi
 fi
 
+step "OCR-движки"
+if _has_extra rapid; then
+    if warm_out="$("$BIN_DIR/kizurium-translator" --ocr-warmup rapid 2>&1)"; then
+        ok "RapidOCR: модели на месте"
+    else
+        printf '%s\n' "$warm_out" | tail -3
+        warn "RapidOCR: модели не подготовлены (нет сети?) — докачай: $BIN_DIR/kizurium-translator --ocr-warmup rapid"
+    fi
+fi
+if [[ "$PADDLE" == yes ]]; then
+    if UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv pip install --python "$VENV_DIR/bin/python" paddleocr paddlepaddle >/dev/null 2>&1; then
+        ok "PaddleOCR установлен"
+        echo "  модели detection/recognition указываются в Настройки → OCR (автозагрузки нет)"
+    else
+        warn "PaddleOCR не установился (нет колеса для Python $PYVER или нет сети) — остальное работает"
+    fi
+fi
+
+BERGAMOT_OK=1
+if [[ "$BERGAMOT" == yes && -n "$BERGAMOT_PAIRS" ]]; then
+    step "Bergamot (локальный перевод)"
+    # PyYAML verifies any model; the engine only runs it. The binding has no wheel
+    # for this Python, so it gets its own small environment (Python 3.10 via uv).
+    uv pip install --python "$VENV_DIR/bin/python" pyyaml >/dev/null 2>&1 || true
+    if "$VENV_DIR/bin/python" -c "import bergamot, yaml" 2>/dev/null; then
+        ok "движок Bergamot уже установлен"
+    elif uv pip install --python "$VENV_DIR/bin/python" --only-binary :all: bergamot >/dev/null 2>&1; then
+        ok "движок Bergamot установлен"
+    elif "$BIN_DIR/kizurium-translator" --bergamot-runtime-install; then
+        ok "движок Bergamot установлен отдельно (свой Python 3.10)"
+    else
+        BERGAMOT_OK=0
+        warn "движок Bergamot не установился: модели будут скачаны и проверены, перевод заработает после:"
+        warn "  $BIN_DIR/kizurium-translator --bergamot-runtime-install"
+        warn "Рабочая офлайн-замена сейчас: ./install.sh --offline-packs (OPUS-MT)"
+    fi
+    for pair in $BERGAMOT_PAIRS; do
+        if "$BIN_DIR/kizurium-translator" --bergamot-install "$pair"; then
+            ok "модель $pair проверена"
+        else
+            # A damaged cached model is dropped and fetched again, once.
+            "$BIN_DIR/kizurium-translator" --bergamot-remove "$pair" >/dev/null 2>&1 || true
+            if "$BIN_DIR/kizurium-translator" --bergamot-install "$pair"; then
+                ok "модель $pair загружена заново"
+            else
+                BERGAMOT_OK=0
+                warn "модель $pair не установлена — повтори: $BIN_DIR/kizurium-translator --bergamot-install $pair"
+            fi
+        fi
+    done
+fi
+
+step "Ярлык и Desktop Actions"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+APPS_DIR="$DATA_HOME/applications"
+ICON_DIR="$DATA_HOME/icons/hicolor/256x256/apps"
+mkdir -p "$APPS_DIR" "$ICON_DIR"
+# Absolute path: a launcher started by the desktop does not see the shell's PATH.
+sed -E "s#^(Try)?Exec=kizurium-translator#\1Exec=$BIN_DIR/kizurium-translator#" \
+    "$REPO_DIR/assets/kizurium-translator.desktop" >"$APPS_DIR/kizurium-translator.desktop"
+install -m 644 "$REPO_DIR/assets/icons/kizurium-translator.png" "$ICON_DIR/kizurium-translator.png"
+have update-desktop-database && update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
+have kbuildsycoca6 && kbuildsycoca6 >/dev/null 2>&1 || true
+have gtk-update-icon-cache && gtk-update-icon-cache -q "$DATA_HOME/icons/hicolor" >/dev/null 2>&1 || true
+ok "ярлык: $APPS_DIR/kizurium-translator.desktop (действия: Открыть окно, Автоперевод, Настройки …)"
+
+# What --update will repeat.
+cat >"$STATE_DIR/install-options" <<EOF
+EXTRAS="$EXTRAS"
+OFFLINE_PACKS=$OFFLINE_PACKS
+MEIKI=$MEIKI
+BERGAMOT_PAIRS="$BERGAMOT_PAIRS"
+PADDLE=$PADDLE
+EOF
+
+step "Состояние моделей"
+"$BIN_DIR/kizurium-translator" --model-status || true
+
 step "Проверка"
 # Doctor over SSH/TTY will complain about WAYLAND_DISPLAY — that must not
 # undo a successful package install. Soft-warn; user runs live from Wayland.
@@ -1002,11 +1126,11 @@ if [[ -n "$SHADOWED" && "$SHADOWED" != "$BIN_DIR/kizurium-translator" ]]; then
     echo "      rm -f \"$BIN_DIR/kizurium-translator\"  # убрать эту"
 fi
 
-if ((PACKS_OK)); then
+if ((PACKS_OK && BERGAMOT_OK)); then
     bold "Готово."
 else
     bold "Поставлено частично."
-    echo "  приложение работает; offline ja→ru/en→ru — докачай командой ниже."
+    echo "  приложение работает; недостающие офлайн-модели — докачай командами выше."
 fi
 cat <<EOF
   выбор области и меню     $RUN_CMD

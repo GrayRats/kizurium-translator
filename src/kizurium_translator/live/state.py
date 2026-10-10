@@ -197,8 +197,15 @@ class State:
     def snapshot(self) -> tuple[list[dict], tuple[int, int, int, int] | None, str]:
         with self._lock:
             if self.hidden:
-                return [], self.region, self.status
+                return [], self.region, ""
             return list(self.blocks), self.region, self.status
+
+    def set_status(self, status: str) -> None:
+        """Update diagnostics without removing cards or invalidating translations."""
+        with self._lock:
+            if self.status != status:
+                self.status = status
+                self._bump()
 
     def peek_blocks(self) -> list[dict]:
         """Карточки даже если hidden — для инкрементального merge без full wipe."""

@@ -9,7 +9,7 @@ without the GUI stack.
 from __future__ import annotations
 
 import os
-import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from . import translate as translate_mod
 
@@ -51,6 +51,12 @@ def _gtk():
         raise RuntimeError(_GUI_ERROR)
     # Before Gtk loads: the a11y bus is often masked on gaming/minimal sessions.
     os.environ.setdefault("GTK_A11Y", "none")
+    # gtk4-layer-shell has to be mapped before GTK and libwayland. Without this
+    # the overlay's init_for_window() fails ("GtkWindow is not a layer surface")
+    # and the overlay opens as an ordinary window instead of a layer.
+    from .layer_shell_lib import preload
+
+    preload()
     try:
         import gi
 
@@ -116,7 +122,7 @@ def translate_text(
     out = tr.translate(text, source=source)
     if out and not is_bad_translation(text, out, target):
         return out, used, "Готово"
-    return "", used, "Сервис недоступен или ответил 429 — попробуй позже"
+    return "", used, getattr(tr, "status", "") or "Translation service unavailable"
 
 
 # ------------------------------------------------------------- text window
@@ -127,11 +133,13 @@ def text_window(
     target: str = "ru",
     initial: str = "",
     translator: translate_mod.Translator | None = None,
-) -> int:
+    *, application=None, controller=None,
+):
     """Two-pane translator window."""
     Gtk, Gdk, GLib = _gtk()
     tr = translator or translate_mod.Translator(target=target, source=source)
-    app = Gtk.Application(application_id=APP_ID_TEXTUI)
+    app = application or Gtk.Application(application_id=APP_ID_TEXTUI)
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="text-translation")
     win_ref: list = []
 
     def on_activate(_app) -> None:  # noqa: ANN001
@@ -214,7 +222,22 @@ def text_window(
         lang_bar.append(src_dd)
         lang_bar.append(btn_swap)
         lang_bar.append(dst_dd)
-        root.append(lang_bar)
+        if controller:
+            # The only addition to the reference layout: an icon laid over the
+            # language bar, so no row is added and the window keeps its size.
+            # Capture / start / stop / quit live in the tray and Desktop Actions.
+            btn_settings = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
+            btn_settings.add_css_class("iconbtn")
+            btn_settings.set_tooltip_text("Settings / Настройки")
+            btn_settings.set_halign(Gtk.Align.END)
+            btn_settings.set_valign(Gtk.Align.CENTER)
+            btn_settings.connect("clicked", lambda _b: controller.dispatch("settings"))
+            top_overlay = Gtk.Overlay()
+            top_overlay.set_child(lang_bar)
+            top_overlay.add_overlay(btn_settings)
+            root.append(top_overlay)
+        else:
+            root.append(lang_bar)
 
         status = Gtk.Label(label="", xalign=0.5)
         status.add_css_class("status")
@@ -241,18 +264,29 @@ def text_window(
             return dst_codes[idx] if idx < len(dst_codes) else "ru"
 
         def schedule(*_a) -> bool:
+            tr.cancel_pending()
             state["job"] += 1
+            if state["thread"] is not None:
+                state["thread"].cancel()
             job = state["job"]
             GLib.timeout_add(DEBOUNCE_MS, run, job)
             return False
 
         def run(job: int) -> bool:
+            nonlocal tr
             if job != state["job"]:
                 return False
             state["source"] = selected(src_dd)
             state["target"] = selected_dst(dst_dd)
-            tr.source = state["source"]
-            tr.target = state["target"]
+            if controller:
+                from dataclasses import replace
+                tr = controller.translator
+                if tr.source != state["source"] or tr.target != state["target"]:
+                    controller.apply_config(replace(controller.conf, source_lang=state["source"], target_lang=state["target"]))
+                    tr = controller.translator
+            else:
+                tr.source = state["source"]
+                tr.target = state["target"]
             text = left["buffer"].get_text(
                 left["buffer"].get_start_iter(), left["buffer"].get_end_iter(), False
             )
@@ -263,8 +297,13 @@ def text_window(
             status.set_label("Перевод…")
             status.remove_css_class("status-err")
 
+            request_tr = tr
+            request_source, request_target = state["source"], state["target"]
             def work() -> None:
-                out, used, note = translate_text(text, state["source"], state["target"], tr)
+                try:
+                    out, used, note = translate_text(text, request_source, request_target, request_tr)
+                except Exception as exc:
+                    out, used, note = "", request_source, "Translation failed: " + type(exc).__name__
 
                 def done() -> None:
                     if job != state["job"]:
@@ -280,21 +319,19 @@ def text_window(
 
                 GLib.idle_add(done)
 
-            previous = state["thread"]
-            thread = threading.Thread(target=work, daemon=True)
-            state["thread"] = thread
-            # At most one request in flight per window. The old guard only
-            # stopped an obsolete answer being displayed; the request itself
-            # still ran to the end. So typing five characters sent five
-            # requests, spent five answers' worth of the endpoint's rate limit,
-            # and returned them in whatever order the network finished. Waiting
-            # briefly for the previous one to notice it is obsolete costs a few
-            # milliseconds and keeps the old request from finishing at all when
-            # it can be helped along.
-            if previous is not None and previous.is_alive():
-                previous.join(timeout=OBSOLETE_WAIT_S)
-            thread.start()
+            state["thread"] = executor.submit(work)
             return False
+
+        if controller:
+            controller.status_listeners.append(status.set_label)
+            def settings_changed():
+                nonlocal tr
+                tr = controller.translator
+                src_dd.set_selected(src_codes.index(tr.source) if tr.source in src_codes else 0)
+                dst_dd.set_selected(dst_codes.index(tr.target) if tr.target in dst_codes else 0)
+                schedule()
+            controller.settings_listeners.append(settings_changed)
+            app.connect("shutdown", lambda *_: executor.shutdown(wait=False, cancel_futures=True))
 
         left["buffer"].connect("changed", schedule)
 
@@ -342,7 +379,11 @@ def text_window(
 
         win.set_child(root)
         def on_close(*_a) -> bool:
-            tr.cache_flush(force=True)
+            if controller:
+                win.set_visible(False)
+                return True
+            tr.shutdown()
+            executor.shutdown(wait=False, cancel_futures=True)
             if win_ref and win_ref[0] is win:
                 win_ref.clear()
             # Without quitting, the process kept running with no window and the
@@ -356,8 +397,15 @@ def text_window(
             schedule()
         win.present()
 
+    if application is not None:
+        on_activate(application)
+        return win_ref[0]
     app.connect("activate", on_activate)
-    return int(app.run([]))
+    try:
+        return int(app.run([]))
+    finally:
+        tr.shutdown()
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _lang_dropdown(Gtk, codes: list[str], value: str):  # noqa: ANN001

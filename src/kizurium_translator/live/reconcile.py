@@ -162,6 +162,9 @@ def rapid_ocr_lines(region_img: Image.Image, max_side: int = 1280) -> list[dict]
             _os.environ.setdefault("OMP_NUM_THREADS", "2")
             _os.environ.setdefault("ORT_NUM_THREADS", "2")
             _os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
+            from ..ocr.selection import inventory
+            if not inventory()["rapid"]["available"]:
+                raise RuntimeError("RapidOCR local ONNX models missing; automatic downloads disabled")
             from rapidocr import RapidOCR
 
             # ONNX Runtime defaults to one intra-op thread per core and keeps

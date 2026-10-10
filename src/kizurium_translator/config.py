@@ -32,6 +32,14 @@ class Config:
     """Every field here is actually read by the engine."""
 
     # translation
+    translation_provider: str = "google"
+    provider_options: Mapping = field(default_factory=dict, repr=False)
+    request_interval: float = 1.8
+    ocr_debounce: float = 0.38
+    bergamot_model_path: str = ""
+    ocr_language: str = "auto"
+    ocr_options: Mapping = field(default_factory=dict)
+    interface_language: str = "ru"
     target_lang: str = "ru"
     source_lang: str = "auto"
     use_gtx: bool = True
@@ -87,7 +95,12 @@ class Config:
 
     def to_dict(self) -> dict:
         return {
+            "general": {"interface_language": self.interface_language},
             "translation": {
+                "provider": self.translation_provider,
+                "request_interval": self.request_interval,
+                "ocr_debounce": self.ocr_debounce,
+                "bergamot_model_path": self.bergamot_model_path,
                 "target": self.target_lang,
                 "source": self.source_lang,
                 "use_gtx": self.use_gtx,
@@ -114,6 +127,8 @@ class Config:
                 "probe_side": self.probe_side,
             },
             "ocr": {
+                "language": self.ocr_language,
+                "options": self.ocr_options,
                 "engines": list(self.ocr_engines),
                 "max_screenshot_side": self.max_screenshot_side,
                 "incremental": self.incremental,
@@ -138,6 +153,16 @@ def _validate(cfg: Config) -> None:
     здесь опаснее ошибки: неверный порог detection не падает, а перестаёт
     замечать движение.
     """
+    import math
+
+    from .translation.providers import PROVIDERS
+
+    if cfg.translation_provider not in PROVIDERS:
+        raise ConfigError("Unknown translation provider")
+    for name in ("request_interval", "ocr_debounce"):
+        v = getattr(cfg, name)
+        if not math.isfinite(v) or v < 0:
+            raise ConfigError(f"{name}: must be finite and non-negative")
     positive = {
         "interval": cfg.interval,
         "interval_sub": cfg.interval_sub,
@@ -246,6 +271,14 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
     ov = data.get("overlay", {})
 
     changes: dict = {}
+    changes["translation_provider"] = str(tr.get("provider", "google"))
+    changes["provider_options"] = tr.get("providers", {})
+    changes["request_interval"] = float(tr.get("request_interval", 1.8))
+    changes["ocr_debounce"] = float(tr.get("ocr_debounce", 0.38))
+    changes["bergamot_model_path"] = str(tr.get("bergamot_model_path", ""))
+    changes["ocr_language"] = str(ocr.get("language", "auto"))
+    changes["ocr_options"] = ocr.get("options", {})
+    changes["interface_language"] = str(data.get("general", {}).get("interface_language", "ru"))
     if "target" in tr:
         changes["target_lang"] = str(tr["target"])
     if "source" in tr:
@@ -301,3 +334,44 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
         changes["profile_id"] = str(prof["id"] or "").strip()
 
     return replace(base, **changes)
+
+
+def save(cfg: Config, path=None) -> None:
+    """Atomic settings write; includes provider options but never credentials."""
+    import json
+    import tempfile
+
+    def value(v):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, Mapping):
+            return "{ " + ", ".join(f"{json.dumps(str(k))} = {value(x)}" for k, x in v.items()) + " }"
+        if isinstance(v, (tuple, list)):
+            return "[" + ", ".join(value(x) for x in v) + "]"
+        return json.dumps(v, ensure_ascii=False)
+
+    target = Path(path or config_path()).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = cfg.to_dict()
+    data["translation"]["providers"] = dict(cfg.provider_options)
+    content = "\n\n".join(
+        f"[{section}]\n" + "\n".join(f"{key} = {value(v)}" for key, v in values.items())
+        for section, values in data.items()) + "\n"
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".config-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, target)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def provider_options(cfg: Config) -> dict:
+    from .credentials import get_key
+
+    options = dict(cfg.provider_options.get(cfg.translation_provider, {}))
+    if cfg.translation_provider not in {"google", "bergamot"} and not cfg.offline_only:
+        options["key"] = get_key(cfg.translation_provider)
+    return options

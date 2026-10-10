@@ -158,6 +158,15 @@ def _enrich_if_sparse(region_img: Image.Image, lines: list[dict]) -> list[dict]:
 
 
 def ocr_image(region_img: Image.Image, hint: str | None = None) -> tuple[list[dict], str]:
+    from ..core.active import current
+    from .engine import annotate_lines
+    selected = current().ocr_engines
+    if selected == ("paddle",):
+        from .selection import paddle_lines
+        return annotate_lines(paddle_lines(region_img), engine="paddle"), "mixed"
+    if selected == ("tesseract",):
+        from .universal import _run_tesseract
+        return annotate_lines(_run_tesseract(region_img), engine="tesseract"), "mixed"
     from ..live.reconcile import rapid_ocr_lines
     t0 = time.monotonic()
     w, h = region_img.size

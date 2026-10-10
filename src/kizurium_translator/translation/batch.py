@@ -176,7 +176,7 @@ def translate_many(
         frame_rev = SCHEDULER.capture()
         # offline_only never opens gtx batch — fall through to per-line
         # (glossary/cache/local MT only).
-        if not getattr(tr, "offline_only", False):
+        if not getattr(tr, "offline_only", False) and getattr(tr, "provider_id", "google") == "google":
             for chunk in pack_local_batch(pending):
                 groups: dict[str, list[str]] = {}
                 for key, src in chunk:
@@ -190,6 +190,8 @@ def translate_many(
                         for idx, k in enumerate(keys)
                     )
                     blob = tr.via_gtx(payload, source=src)
+                    if SCHEDULER.stale(frame_rev):
+                        return [cache.get(t, t) for t in texts]
                     parsed = {} if (not blob or is_translation_error(payload, blob)) else parse_marked_translation(blob)
                     tlog(f"gtx-response parsed={len(parsed)} keys={list(parsed.keys())} sample={str(list(parsed.values())[0])[:50] if parsed else 'empty'}")
                     for idx, key in enumerate(keys):
@@ -206,7 +208,7 @@ def translate_many(
         if still:
             # When gtx is cooling after 429, single-line must use MyMemory —
             # otherwise the batch path leaves every miss untranslated.
-            use_slow = bool(tr.allow_slow) or tr.gtx_cooling()
+            use_slow = False
             futures = {
                 (key, src): TRANSLATION.pool.submit(
                     _translate_line_job, key, src == "ja", use_slow
