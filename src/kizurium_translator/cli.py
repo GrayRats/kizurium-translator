@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import shutil
@@ -24,7 +25,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import capture, selector, ui
-from .config import Config, config_path, load
+from .config import Config, config_path, load, provider_options
 from .paths import default_paths
 from .translate import Translator
 
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("geom", nargs="?", metavar="GEOM", help=f"region to use, {GEOM_HELP}")
 
     action = p.add_argument_group("actions")
+    action.add_argument("--action", choices=("settings", "select-region", "show-window", "capture-window", "toggle-offline", "start-auto-translate", "stop-auto-translate", "quit"))
     action.add_argument("--toggle", action="store_true", help="region + menu, or stop live")
     action.add_argument("--live", action="store_true", help="start live translation")
     action.add_argument(
@@ -120,6 +122,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="install offline pack by id, or 'all' for every catalog pack",
     )
     action.add_argument(
+        "--model-status",
+        action="store_true",
+        help="OCR engines and languages, Bergamot runtime and models, offline packs",
+    )
+    action.add_argument(
+        "--bergamot-install",
+        metavar="SRC-DST",
+        help="download and verify a Bergamot model (e.g. en-ru; Mozilla repository, sha256-checked)",
+    )
+    action.add_argument(
+        "--bergamot-runtime-install",
+        action="store_true",
+        help="prepare the Bergamot engine: own Python 3.10 + the bergamot wheel (needs uv and network)",
+    )
+    action.add_argument(
+        "--bergamot-runtime-remove",
+        action="store_true",
+        help="remove the Bergamot engine environment (models stay)",
+    )
+    action.add_argument(
+        "--bergamot-remove",
+        metavar="SRC-DST",
+        help="remove a Bergamot model from Kizurium's cache (Firefox files are never touched)",
+    )
+    action.add_argument(
+        "--ocr-warmup",
+        metavar="ENGINE",
+        help="fetch the models of an installed OCR engine now (rapid)",
+    )
+    action.add_argument(
         "--from",
         dest="pack_from",
         metavar="PATH",
@@ -147,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="list bundled game profiles and exit",
     )
-    opts.add_argument("--engine", action="append", choices=("rapid", "meiki", "tesseract"),
+    opts.add_argument("--engine", action="append", choices=("rapid", "meiki", "tesseract", "paddle"),
                       help="OCR engine order, repeatable")
     opts.add_argument("--interval", type=float, metavar="SEC", help="live re-OCR interval")
     opts.add_argument("--no-gtx", action="store_true", help="disable the direct translate endpoint")
@@ -198,6 +230,11 @@ def make_translator(conf: Config) -> Translator:
     paths = default_paths()
     paths.ensure()
     return Translator(
+        provider=conf.translation_provider,
+        provider_options=provider_options(conf),
+        request_interval=conf.request_interval,
+        ocr_debounce=conf.ocr_debounce,
+        model_path=conf.bergamot_model_path,
         target=conf.target_lang,
         source=conf.source_lang,
         use_gtx=conf.use_gtx,
@@ -532,16 +569,8 @@ def cmd_ocr_copy(args: argparse.Namespace, conf: Config) -> int:
 
 
 def cmd_live(args: argparse.Namespace, conf: Config, geom: str) -> int:
-    from . import live
-
-    if running_pid():
-        print("live уже запущен — сначала --stop", file=sys.stderr)
-        return 1
-    live.configure(conf)
-    if args.no_translate:
-        live.TRANSLATION_DISABLED = True
-    print(f"live {geom}", file=sys.stderr)
-    return live.main_for_cli(geom)
+    from .desktop import run
+    return run("start-auto-translate", conf, geometry=geom, path=args.config)
 
 
 def stop_text_window() -> int:
@@ -570,31 +599,8 @@ def stop_text_window() -> int:
 
 
 def cmd_text(conf: Config, initial: str = "") -> int:
-    # One window at a time: an older instance that is still alive would be
-    # re-activated by GApplication and end up next to the new one.
-    from .paths import emit_storage_banner
-
-    emit_storage_banner(default_paths(), also_log=False)
-    stop_text_window()
-    pid_file = default_paths().text_pid
-    try:
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(os.getpid()), encoding="utf-8")
-    except OSError:
-        pass
-    try:
-        return ui.text_window(
-            source=conf.source_lang,
-            target=conf.target_lang,
-            initial=initial,
-            translator=make_translator(conf),
-        )
-    finally:
-        try:
-            if pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                pid_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+    from .desktop import run
+    return run("show-window", conf, initial=initial)
 
 
 def cmd_main_flow(args: argparse.Namespace, conf: Config) -> int:
@@ -614,8 +620,8 @@ def cmd_main_flow(args: argparse.Namespace, conf: Config) -> int:
     emit_storage_banner(default_paths(), also_log=False)
     if not selector.have_selector():
         print(
-            "Standalone selector недоступен. Установите Quickshell "
-            "(Arch: pacman -S quickshell · Nix: pkgs.quickshell).\n"
+            "Селектор недоступен: нужны GTK4 и gtk4-layer-shell с привязками Python "
+            "(Arch: pacman -S gtk4 gtk4-layer-shell python-gobject).\n"
             "Обход без селектора:\n"
             "  kizurium-translator --live --region \"0,0 800x600\"\n"
             "  kizurium-translator --output   # выбрать монитор (нужен slurp)",
@@ -630,6 +636,10 @@ def cmd_main_flow(args: argparse.Namespace, conf: Config) -> int:
     if not action:
         print("отменено", file=sys.stderr)
         return 1
+    if action == selector.SEL_SETTINGS:
+        from .desktop import run
+
+        return run("settings", conf, path=args.config)
     scoped = argparse.Namespace(**{**vars(args), "region": geom, "geom": None})
     if action == selector.SEL_OCR:
         return cmd_ocr_copy(scoped, conf)
@@ -642,16 +652,15 @@ def cmd_main_flow(args: argparse.Namespace, conf: Config) -> int:
 
 # What the exit code depends on, and what it does not.
 #
-# quickshell was in `REQUIRED_TOOLS`, which made it a core dependency: a machine
-# with everything the overlay needs and no quickshell exited 1 from `--doctor`.
-# Only the selector needs quickshell, and an optional thing must not be
-# reported as a core failure - so the selector has its own
-# section and nothing in it decides the code.
+# The region selector is GTK4 + layer-shell and has its own section: a machine
+# that cannot show it still translates (--live --region, --text), so it must not
+# decide the exit code of `--doctor`.
 #
-# grim is what the overlay captures with: no grim, no live translation. wl-copy
+# grim is what the overlay captures with outside KDE (there the portal is checked
+# instead): no grim, no live translation. wl-copy
 # backs `--ocr-copy` and slurp backs `--output`; both are features, not the core.
 CORE_TOOLS = ("grim",)
-SELECTOR_TOOLS = ("quickshell",)
+SELECTOR_TOOLS: tuple[str, ...] = ()  # no external tools: GTK4 + layer-shell
 OPTIONAL_TOOLS = ("wl-copy", "slurp")
 REQUIRED_LANGS = ("eng", "rus")
 
@@ -781,6 +790,129 @@ def cmd_packs() -> int:
     return 0
 
 
+def _pair(raw: str) -> tuple[str, str]:
+    src, _, dst = (raw or "").strip().partition("-")
+    if not src or not dst:
+        raise SystemExit(f"error: ожидается пара вида en-ru, получено {raw!r}")
+    return src, dst
+
+
+def cmd_model_status(conf: Config) -> int:
+    """One report for everything local: OCR engines, Bergamot, offline packs."""
+    from .ocr.selection import inventory
+    from .translation import bergamot as bg
+
+    print("OCR-движки:")
+    for name, row in inventory(conf.ocr_options).items():
+        print(f"  {'✓' if row['available'] else '✗'} {name:10} {row['detail']}")
+    kind = bg.runtime_kind()
+    print("\nBergamot (локальный перевод):")
+    print(f"  {'✓' if kind else '✗'} движок: "
+          + {"in-process": "установлен (в основном Python)", "helper": f"установлен (отдельный Python {bg.HELPER_PYTHON})"}.get(
+              kind, "нет — kizurium-translator --bergamot-runtime-install (без него работают офлайн-паки OPUS-MT)"))
+    root = bg.cache_root()
+    found = False
+    for manifest in sorted(root.glob("*/kizurium-model.json")) if root.is_dir() else []:
+        found = True
+        try:
+            meta = json.loads(manifest.read_text(encoding="utf-8"))
+            bg.validate_files(manifest.parent, meta["source"], meta["target"])
+            state, size = "проверена", sum(f["size"] for f in meta["files"].values()) / 1048576
+            print(f"  ✓ {meta['source']}→{meta['target']}  v{meta.get('version', '?')}  {size:.0f} МиБ  {state}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ✗ {manifest.parent.name}  повреждена или несовместима ({type(exc).__name__})")
+    if not found:
+        print(f"  — моделей нет ({root}); установка: kizurium-translator --bergamot-install en-ru")
+    print("\nОфлайн-паки (OPUS-MT):")
+    return cmd_packs()
+
+
+def cmd_bergamot_install(args: argparse.Namespace, conf: Config) -> int:
+    from .translation import bergamot as bg
+    from .translation.providers import ProviderError
+    from .translation.scheduler import Cancelled
+
+    if conf.offline_only:
+        print("error: включён автономный режим — загрузки запрещены (offline_only в конфиге)", file=sys.stderr)
+        return 1
+    src, dst = _pair(args.bergamot_install)
+    manager = bg.ModelManager(lambda: False, lambda status, pair, progress, detail: print(
+        f"\r  {status} {pair} {progress:5.0%} {detail}".ljust(78), end="", flush=True))
+    try:
+        path = manager.download(src, dst)
+    except Cancelled:
+        print("\nотменено")
+        return 1
+    except ProviderError as exc:
+        print(f"\nerror: {exc.category}: {exc.detail or 'не удалось'}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nпрервано; готовая модель (если была) не тронута")
+        return 130
+    finally:
+        manager.shutdown()
+    print(f"\n✓ {src}→{dst}: {path}")
+    if not bg.runtime_available():
+        print("  модель проверена по контрольной сумме; для перевода нужен движок: "
+              "kizurium-translator --bergamot-runtime-install")
+    return 0
+
+
+def cmd_bergamot_runtime(conf: Config, remove: bool = False) -> int:
+    from .translation import bergamot as bg
+    from .translation.providers import ProviderError
+
+    if remove:
+        bg.remove_runtime()
+        print(f"удалено: {bg.runtime_dir()}")
+        return 0
+    if conf.offline_only:
+        print("error: включён автономный режим — загрузки запрещены (offline_only в конфиге)", file=sys.stderr)
+        return 1
+    try:
+        venv = bg.install_runtime(lambda status, _what, progress, detail: print(
+            f"  {status} {progress:4.0%} {detail}", flush=True))
+    except ProviderError as exc:
+        print(f"error: {exc.detail or exc.category}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    print(f"✓ движок Bergamot готов: {venv}")
+    return 0
+
+
+def cmd_bergamot_remove(args: argparse.Namespace) -> int:
+    from .translation import bergamot as bg
+
+    src, dst = _pair(args.bergamot_remove)
+    path = bg.cache_root() / bg.pair_name(src, dst)
+    if path.is_symlink() or not path.exists():
+        print(f"модели {src}→{dst} в кэше нет")
+        return 1
+    shutil.rmtree(path)
+    print(f"удалено: {path}")
+    return 0
+
+
+def cmd_ocr_warmup(engine: str) -> int:
+    if engine != "rapid":
+        print(f"error: прогрев поддерживается для rapid, получено {engine!r}", file=sys.stderr)
+        return 2
+    try:
+        from rapidocr import RapidOCR
+
+        RapidOCR()  # downloads its detection/classification/recognition models once
+    except ImportError:
+        print("error: RapidOCR не установлен (extra rapid)", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: не удалось подготовить модели RapidOCR: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    print("✓ модели RapidOCR на месте")
+    return 0
+
+
 def cmd_pack_install(args: argparse.Namespace) -> int:
     from .translation.packs import install_pack, install_recommended_packs
 
@@ -899,6 +1031,28 @@ def _tool_line(name: str, *, required: bool, hint: str = ""):
     return Line(name=name, status=Status.MISSING, detail=hint or "не найден", required=required)
 
 
+def _portal_capture_line():
+    """KDE captures through the ScreenCast portal: it needs GStreamer's pipewiresrc."""
+    from .diagnose import Line, Status
+
+    name = "screen capture (ScreenCast portal)"
+    try:
+        import gi
+
+        gi.require_version("Gst", "1.0")
+        gi.require_version("GstApp", "1.0")
+        from gi.repository import Gst
+
+        Gst.init(None)
+        if Gst.ElementFactory.find("pipewiresrc") is None:
+            return Line(name=name, status=Status.MISSING, required=True,
+                        detail="нет GStreamer pipewiresrc (Arch: pacman -S gst-plugin-pipewire)")
+    except Exception as exc:  # noqa: BLE001
+        return Line(name=name, status=Status.MISSING, required=True,
+                    detail=f"GStreamer недоступен ({type(exc).__name__}): gst-plugins-base, python-gobject")
+    return Line(name=name, status=Status.OK, required=True, detail="GStreamer + pipewiresrc")
+
+
 def _module_line(module: str, label: str, *, required: bool = False, hint: str = ""):
     """One Python dependency, importable or not."""
     from .diagnose import Line, Status
@@ -965,7 +1119,12 @@ def cmd_doctor(conf: Config) -> int:
         core.add("pycairo", Status.OK, detail="ok", required=True)
     except Exception as exc:  # noqa: BLE001
         core.add("pycairo", Status.ERROR, detail=type(exc).__name__, required=True)
-    core.add_line(_tool_line("grim", required=True, hint="нет (нужен для захвата кадра)"))
+    if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", ""):
+        # KWin has no wlr-screencopy: grim cannot capture there, the portal does.
+        core.add_line(_portal_capture_line())
+        core.add_line(_tool_line("grim", required=False, hint="не нужен на KDE: захват идёт через портал"))
+    else:
+        core.add_line(_tool_line("grim", required=True, hint="нет (нужен для захвата кадра)"))
 
     # --- Wayland: the session, not the tools. ---
     wayland_disp = os.environ.get("WAYLAND_DISPLAY")
@@ -1000,18 +1159,14 @@ def cmd_doctor(conf: Config) -> int:
         have_qml = have_selector()
     except Exception:  # noqa: BLE001
         have_qml = False
-    has_quick = shutil.which("quickshell")
-    if has_quick and have_qml:
-        selector.add("region selector", Status.OK, detail="quickshell + qml")
-    elif has_quick:
-        selector.add("region selector", Status.ERROR, detail="qml не найден в пакете")
+    if have_qml:
+        selector.add("region selector", Status.OK, detail="GTK4 + layer-shell")
     else:
-        # Not MISSING-and-required.  only the selector needs quickshell, so
-        # its absence says nothing about live translation.
+        # Not MISSING-and-required: its absence says nothing about live translation.
         selector.add(
             "region selector",
             Status.DISABLED,
-            detail="нет quickshell; --live и --text работают, выбор области — нет",
+            detail="нет gtk4-layer-shell; --live и --text работают, выбор области — нет",
         )
 
     # --- OCR: tesseract is required (eng+rus); the rest are alternatives. ---
@@ -1077,7 +1232,7 @@ def cmd_doctor(conf: Config) -> int:
             detail="offline_only в конфиге — сеть не используется",
         )
     elif conf.use_gtx:
-        translation.add("online fallback", Status.OK, detail="gtx, затем MyMemory при 429")
+        translation.add("translation provider", Status.OK, detail=conf.translation_provider + "; no cloud fallback")
     else:
         translation.add(
             "online fallback", Status.DISABLED, detail="use_gtx=false в конфиге"
@@ -1227,7 +1382,20 @@ def _main(argv: list[str] | None = None) -> int:
         capture.ensure_wayland_env()
     conf = resolve_config(args)
 
+    if args.action:
+        if args.action in ("quit", "stop-auto-translate"):
+            # Only meaningful for a running instance: never start a second GUI
+            # process just to tell it to stop.
+            from .desktop import forward
+            if not forward(args.action):
+                print("не запущено", file=sys.stderr)
+            return 0
+        from .desktop import run
+        return run(args.action, conf, path=args.config)
     if args.stop:
+        from .desktop import forward
+        if forward("stop-auto-translate"):
+            return 0
         return stop_live()
     if args.status:
         pid = running_pid()
@@ -1261,6 +1429,18 @@ def _main(argv: list[str] | None = None) -> int:
         return cmd_tm_list(conf)
     if getattr(args, "tm_promote", None):
         return cmd_tm_promote(args, conf)
+    if getattr(args, "model_status", False):
+        return cmd_model_status(conf)
+    if getattr(args, "bergamot_install", None):
+        return cmd_bergamot_install(args, conf)
+    if getattr(args, "bergamot_runtime_install", False):
+        return cmd_bergamot_runtime(conf)
+    if getattr(args, "bergamot_runtime_remove", False):
+        return cmd_bergamot_runtime(conf, remove=True)
+    if getattr(args, "bergamot_remove", None):
+        return cmd_bergamot_remove(args)
+    if getattr(args, "ocr_warmup", None):
+        return cmd_ocr_warmup(args.ocr_warmup)
     if getattr(args, "packs", False):
         return cmd_packs()
     if getattr(args, "pack_install", None):
@@ -1282,7 +1462,6 @@ def _main(argv: list[str] | None = None) -> int:
     if args.live:
         return cmd_live(args, conf, ask_region(args, auto_action="live"))
     if args.toggle:
-        if running_pid():
-            return stop_live()
-        return cmd_main_flow(args, conf)
+        from .desktop import run
+        return run("toggle", conf, path=args.config)
     return cmd_main_flow(args, conf)

@@ -69,7 +69,13 @@ def installed_tesseract_langs() -> tuple[str, ...]:
 
 def tesseract_lang_string(installed: tuple[str, ...] | None = None) -> str:
     """Build a ``eng+rus+jpn…`` string from what is actually installed."""
+    from ..core.active import current
+    selected = current().ocr_language
     have = set(installed if installed is not None else installed_tesseract_langs())
+    if selected != "auto":
+        if not set(selected.split("+")).issubset(have):
+            raise RuntimeError("Selected Tesseract language packs are missing")
+        return selected
     picked = [code for code in _TESS_PREFERRED if code in have]
     if not picked and have:
         picked = sorted(have)[:6]
@@ -328,12 +334,28 @@ def _run_meiki(region_img: Image.Image) -> list[dict]:
 def _run_tesseract(region_img: Image.Image, langs: str | None = None) -> list[dict]:
     if not engine_enabled("tesseract"):
         return []
+    from ..core.active import current
+    from .preprocess import prepare_for_ocr, scale_boxes_down
+
     lang = langs or tesseract_lang_string()
-    try:
-        # psm=None → adaptive geometry
-        return list(ocr_with(region_img, lang, psm=None) or [])
-    except Exception:  # noqa: BLE001 - soft miss
-        return []
+    options = current().ocr_options
+    mode = str(options.get("tesseract_psm", "auto"))
+    if mode not in {"auto", "6", "7", "11", "12", "13"}:
+        raise RuntimeError("Unsupported Tesseract segmentation mode")
+    if options.get("tesseract_pixel_font", False):
+        from PIL import ImageOps, ImageStat
+
+        work = ImageOps.grayscale(region_img)
+        if ImageStat.Stat(work).median[0] < 128:
+            work = ImageOps.invert(work)
+        # Integer nearest-neighbour scaling preserves the steps of a bitmap font.
+        # Keep memory bounded on full monitor captures.
+        scale = 2 if region_img.width * region_img.height <= 4_000_000 else 1
+        work = work.resize((work.width * scale, work.height * scale), Image.Resampling.NEAREST)
+    else:
+        work, scale = prepare_for_ocr(region_img)
+    lines = ocr_with(work, lang, psm=None if mode == "auto" else mode)
+    return scale_boxes_down(list(lines or []), scale)
 
 
 def _coverage_thin(region_img: Image.Image, lines: list[dict]) -> bool:
@@ -386,6 +408,10 @@ def universal_ocr_lines(region_img: Image.Image) -> list[dict[str, Any]]:
 
 def _recognize_on(region_img: Image.Image) -> list[dict]:
     """One recognition pass on an (already prepared) image."""
+    from ..core.active import current
+    if current().ocr_engines == ("paddle",):
+        from .selection import paddle_lines
+        return paddle_lines(region_img)
     avail = set(available_engines())
     lines: list[dict] = []
 

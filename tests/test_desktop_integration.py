@@ -50,7 +50,7 @@ class TestTheDesktopFile:
         # Terminal=false: приложение рисует оверлей слоем, окно терминала ему
         # только мешает.
         assert entry["Terminal"] == "false"
-        assert entry["Exec"] == "kizurium-translator --toggle"
+        assert entry["Exec"] == "kizurium-translator"  # plain launch: the normal region selector, no --toggle
 
     def test_the_command_it_names_is_the_command_we_ship(self):
         entry = _desktop()["Desktop Entry"]
@@ -121,3 +121,38 @@ class TestBothFilesArePackaged:
         build = (ROOT / "PKGBUILD").read_text(encoding="utf-8")
         assert "usr/share/applications/$pkgname.desktop" in build
         assert "usr/share/icons/hicolor/256x256/apps/$pkgname.png" in build
+
+
+class TestDesktopActions:
+    """Every Desktop Action must reach a real --action of the running instance."""
+
+    def _sections(self):
+        parser = _desktop()
+        return {n[len("Desktop Action "):]: parser[n] for n in parser.sections() if n.startswith("Desktop Action ")}
+
+    def test_the_listed_actions_and_the_sections_are_the_same_set(self):
+        listed = [a for a in _desktop()["Desktop Entry"]["Actions"].split(";") if a]
+        assert sorted(listed) == sorted(self._sections())
+        assert len(listed) == len(set(listed))
+
+    def test_every_action_calls_an_action_the_cli_accepts(self):
+
+        from kizurium_translator import cli
+
+        choices = next(a for a in cli.build_parser()._actions if a.dest == "action").choices
+        for name, section in self._sections().items():
+            exec_line = section["Exec"].split()
+            assert exec_line[:2] == ["kizurium-translator", "--action"], name
+            assert exec_line[2] in choices, f"{name}: --action {exec_line[2]} is not accepted"
+
+    def test_every_action_is_named_in_both_languages_and_has_an_icon(self):
+        for name, section in self._sections().items():
+            assert section["Name"] and section["Name[ru]"], name
+            assert section["Icon"].endswith("-symbolic"), name
+
+    def test_the_controller_handles_every_action_the_menu_can_send(self):
+        from kizurium_translator import cli, desktop
+
+        for name, section in self._sections().items():
+            action = section["Exec"].split()[2]
+            assert action in desktop.ACTIONS or action in {"quit"}, f"{name}: {action} has no handler"

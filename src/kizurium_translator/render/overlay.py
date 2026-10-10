@@ -520,12 +520,28 @@ def _fill_by_color_spans(
 
 
 def draw_blocks(cr: cairo.Context, blocks: list[dict], region: tuple[int, int, int, int] | None, status: str) -> None:
-    _ = region, status
     cr.save()
     cr.set_operator(cairo.Operator.CLEAR)
     cr.paint()
     cr.restore()
     cr.set_operator(cairo.Operator.OVER)
+
+    if status and not blocks:
+        # Errors used to be discarded, leaving an indistinguishable empty layer.
+        # State.snapshot suppresses this banner during the clean-capture barrier.
+        layout = PangoCairo.create_layout(cr)
+        font = Pango.FontDescription.from_string("Sans 14")
+        layout.set_font_description(font)
+        layout.set_width(max(40, min(760, (region[2] if region else 800) - 32)) * Pango.SCALE)
+        layout.set_wrap(Pango.WrapMode.WORD_CHAR)
+        layout.set_text(status, -1)
+        width, height = layout.get_pixel_size()
+        cr.set_source_rgba(0.08, 0.09, 0.12, 0.94)
+        cr.rectangle(4, 4, width + 24, height + 20)
+        cr.fill()
+        cr.move_to(16, 14)
+        cr.set_source_rgba(1, 1, 1, 1)
+        PangoCairo.show_layout(cr, layout)
 
     # Cards already drawn this frame, in the order they are drawn, as the four
     # corners they were actually drawn at. Used to keep a long translation from

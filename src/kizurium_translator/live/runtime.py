@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from .. import fonts as fonts_mod
 from .. import translate as translate_mod
-from ..config import Config
+from ..config import Config, provider_options
 from ..core import scripts, text
 from ..core.text import (  # noqa: F401
     tlog,
@@ -222,8 +222,13 @@ def configure(config: Config, paths: Paths | None = None) -> None:
     emit_storage_banner(text.PATHS)
 
     if TRANSLATION.translator is not None:
-        TRANSLATION.translator.cache_flush(force=True)
+        TRANSLATION.translator.shutdown()
     TRANSLATION.translator = translate_mod.Translator(
+        provider=config.translation_provider,
+        provider_options=provider_options(config),
+        request_interval=config.request_interval,
+        ocr_debounce=config.ocr_debounce,
+        model_path=config.bergamot_model_path,
         target=config.target_lang,
         source=config.source_lang,
         use_gtx=config.use_gtx,
@@ -252,7 +257,7 @@ def shutdown() -> None:
     """Flush the cache and release the pool. Safe to call more than once."""
     if TRANSLATION.translator is not None:
         try:
-            TRANSLATION.translator.cache_flush(force=True)
+            TRANSLATION.translator.shutdown()
         except Exception:  # noqa: BLE001
             pass
     TRANSLATION.pool.shutdown(wait=False, cancel_futures=True)

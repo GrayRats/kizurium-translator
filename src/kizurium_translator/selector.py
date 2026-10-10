@@ -1,8 +1,8 @@
 """Region selector: fullscreen overlay that picks where and what.
 
-QML lives in ``qml/selector/``. Started with ``quickshell -p <dir>`` as its
-own shell root — does not read or change the user's Quickshell or compositor
-config. Returns ``(action, geometry)``; OCR/translation are done by the caller.
+The overlay is a GTK4 + layer-shell process (``gtk_selector.py``) started per call;
+it takes no screenshot and changes no compositor configuration. Returns
+``(action, geometry)``; OCR/translation are done by the caller.
 """
 
 from __future__ import annotations
@@ -12,21 +12,22 @@ import json
 import os
 import re
 import secrets
-import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 from . import logging_setup
 from .paths import default_paths
 
-QML_DIR = Path(__file__).resolve().parent / "qml" / "selector"
+GTK_SELECTOR = "kizurium_translator.gtk_selector"
 
 SEL_CANCEL = ""
 SEL_OCR = "ocr"
 SEL_TEXT = "text"
 SEL_LIVE = "live"
+SEL_SETTINGS = "settings"
 
 # The toolbar, in the order it is drawn. The round Live button is the last entry
 # and is the default for Return.
@@ -41,8 +42,6 @@ DEFAULT_TIMEOUT_S = 120.0
 # runs, and without the shell-side timer the overlay would sit on the screen
 # holding the keyboard with nothing left to close it.
 WATCHDOG_S = 100.0
-
-_IPC_TARGET = "selector"
 
 # Poll interval while waiting for the answer. There is no settle time any more:
 # the shell reads what it needs as it loads, so there is nothing to wait for
@@ -62,21 +61,22 @@ class SelectorError(RuntimeError):
     """The selector could not be started."""
 
 
-class _AlreadyOpen(Exception):
-    """Another selector shell already owns this path, and has been closed."""
-
-
 def have_selector() -> bool:
-    """True when quickshell is installed and the QML is present."""
-    return bool(shutil.which("quickshell")) and (QML_DIR / "shell.qml").is_file()
+    """True when the GTK4 layer-shell bindings the selector needs are installed."""
+    try:
+        import gi
+
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Gtk4LayerShell", "1.0")
+    except (ImportError, ValueError):
+        return False
+    return True
 
 
 def _install_hint() -> str:
-    if not (QML_DIR / "shell.qml").is_file():
-        return f"QML не найден: {QML_DIR}"
     return (
-        "Установи quickshell "
-        "(Arch: pacman -S quickshell · Nix: pkgs.quickshell). "
+        "Нужны GTK4 и gtk4-layer-shell с привязками Python "
+        "(Arch: pacman -S gtk4 gtk4-layer-shell python-gobject · Nix: pkgs.gtk4-layer-shell). "
         "Обход: kizurium-translator --live --region \"x,y WxH\" или --output"
     )
 
@@ -84,21 +84,9 @@ def _install_hint() -> str:
 # --------------------------------------------------------------------- freeze
 
 
-def _frame_problem(path: Path) -> str:
-    """What the overlay reported about its own frame, or "" if all is well.
-
-    The overlay captures the frame itself, so this is the only way to find out
-    that the capture did not work. A silent blank overlay is not acceptable, so
-    the answer goes into the log.
-    """
-    try:
-        data = json.loads(path.read_text(encoding="utf-8") or "{}")
-    except (OSError, ValueError):
-        return ""
-    status = str(data.get("frame") or "ok")
-    if status == "ok":
-        return ""
-    return f"снимок экрана не удался (output={data.get('name') or '?'}, {status})"
+def _frame_problem(path: Path) -> str:  # noqa: ARG001
+    """Kept for callers: the GTK selector captures nothing, so it has no frame to fail."""
+    return ""
 
 
 # ----------------------------------------------------------------- single run
@@ -153,8 +141,7 @@ class _Single:
 def _stop_shell(shell: subprocess.Popen | None) -> None:
     """Stop only the selector we started, by pid.
 
-    Never by name: the process is called quickshell, and killing that name would
-    take down whatever shell the user runs.
+    Never by name: only the child this run started.
     """
     if shell is None or shell.poll() is not None:
         return
@@ -288,22 +275,6 @@ def remember_geometry(geom: str, key: str = "") -> None:
         pass
 
 
-def _frames_for(base: str) -> list[Path]:
-    """Every capture the overlay may have written for one run.
-
-    The overlay numbers its captures, so a run that was retried left more than
-    one file. Cleaning a single path left the rest in the runtime directory,
-    where they outlived the session that made them.
-    """
-    if not base:
-        return []
-    try:
-        prefix = Path(base)
-    except (TypeError, ValueError):
-        return []
-    return sorted(prefix.parent.glob(f"{prefix.name}-*.png"))
-
-
 def _write_start_request(
     runtime_dir: Path,
     token: str,
@@ -328,11 +299,8 @@ def _write_start_request(
     request: dict[str, object] = {
         "token": token,
         "result": str(runtime_dir / f"selector-result-{token}.json"),
-        "screen": str(runtime_dir / f"selector-screen-{token}.json"),
-        # A base name, not a path: the overlay numbers its own captures so a
-        # retry writes a new file rather than overwriting the one its Image
-        # already has open, which is what produced a half-drawn frame.
-        "frame": str(runtime_dir / f"selector-frame-{token}"),
+        # A second key press drops this file; the running selector sees it and closes.
+        "cancel": str(runtime_dir / "selector-cancel"),
         "geometries": remembered_regions(),
         "watchdogMs": int(watchdog_s * 1000),
         "autoAction": (auto_action or "").strip(),
@@ -389,12 +357,8 @@ def select_region(
                 f"не удалось подготовить селектор: {exc} ({paths.runtime_dir})"
             ) from exc
         out = Path(request["result"])
-        screen_out = Path(request["screen"])
-        frame_base = str(request["frame"])
-        for stale in (out, screen_out):
-            stale.unlink(missing_ok=True)
-        for stale in _frames_for(frame_base):
-            stale.unlink(missing_ok=True)
+        Path(str(request["cancel"])).unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
 
         shell: subprocess.Popen | None = None
         log_fh = None
@@ -405,7 +369,7 @@ def select_region(
         # toolbar, the watchdog, a timeout, or a signal.
         previous_handlers: dict[int, object] = {}
         try:
-            # Rotate before appending: the quickshell output is handed straight
+            # Rotate before appending: the selector's output is handed straight
             # to this descriptor, so the file is opened once per run and the
             # size check happens here rather than through a handler.
             sel_log = logging_setup.get_logger("selector", log, to_stderr=False)
@@ -417,9 +381,16 @@ def select_region(
                 # A missing log must not stop the selector, but the run then has
                 # nowhere to record why it failed.
                 log_fh = None
+            # An absolute PYTHONPATH: the child runs in the runtime directory, so a
+            # relative one (PYTHONPATH=src) would stop resolving the package.
+            env = dict(os.environ)
+            root = str(Path(__file__).resolve().parent.parent)
+            env["PYTHONPATH"] = os.pathsep.join(
+                p for p in [root, *(os.path.abspath(q) for q in env.get("PYTHONPATH", "").split(os.pathsep) if q)])
             shell = subprocess.Popen(
-                ["quickshell", "-n", "-p", str(QML_DIR)],
+                [sys.executable, "-m", GTK_SELECTOR, str(paths.selector_request)],
                 cwd=str(paths.runtime_dir),
+                env=env,
                 stdout=log_fh or subprocess.DEVNULL,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -434,17 +405,8 @@ def select_region(
                     previous_handlers.pop(sig, None)
 
             action = _read_result(out, timeout_s, shell)
-            if log_fh is not None:
-                problem = _frame_problem(screen_out)
-                if problem:
-                    log_fh.write(f"selector {token}: {problem}\n")
-                    log_fh.flush()
-            if not action and shell is not None and shell.poll() is not None:
-                # -n makes quickshell exit at once when another shell already
-                # owns this path. That is not a user cancelling, and the real
-                # overlay is still up: close it and get out of the way.
-                _cancel_existing()
-                raise _AlreadyOpen
+            if not action and shell is not None and shell.poll() not in (None, 0):
+                sel_log.warning("selector %s: завершился с кодом %s", token, shell.poll())
             if action and out.is_file():
                 try:
                     answer = json.loads(out.read_text(encoding="utf-8") or "{}")
@@ -455,9 +417,6 @@ def select_region(
                 # against that output instead of overwriting whatever the last
                 # run on a different monitor happened to leave behind.
                 output = str(answer.get("output") or "")
-        except _AlreadyOpen:
-            sel_log.info("selector %s: другой селектор уже открыт", token)
-            return SEL_CANCEL, ""
         except subprocess.TimeoutExpired as exc:
             sel_log.warning("selector %s: не ответил вовремя", token)
             raise SelectorError("селектор не ответил вовремя") from exc
@@ -471,11 +430,14 @@ def select_region(
             # several files behind.
             _cleanup_selector(
                 shell,
-                (out, screen_out, *_frames_for(frame_base)),
+                (out,),
                 previous_handlers,
                 log_fh,
             )
 
+    # Settings is not a capture action: it needs no geometry and is always allowed.
+    if action == SEL_SETTINGS:
+        return action, ""
     if action not in actions:
         return SEL_CANCEL, ""
     # Next time the selector opens on this same output, with the same region
@@ -484,24 +446,14 @@ def select_region(
     return action, geometry
 
 
-def _ipc(*args: str) -> bool:
-    """Send one IPC message to the running selector shell."""
-    try:
-        res = subprocess.run(
-            ["quickshell", "-p", str(QML_DIR), "ipc", "call", _IPC_TARGET, *args],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return res.returncode == 0
-
-
 def _cancel_existing() -> None:
     """Pressing the key again closes the overlay that is already up.
 
-    This is the escape hatch that does not depend on the overlay cooperating: if
-    Escape somehow does not arrive, the same key gets you out.
+    This is the escape hatch that does not depend on the overlay cooperating with
+    the keyboard: the running selector polls for this marker and closes itself.
     """
-    _ipc("cancel")
+    try:
+        default_paths().runtime_dir.mkdir(parents=True, exist_ok=True)
+        (default_paths().runtime_dir / "selector-cancel").touch()
+    except OSError:
+        pass

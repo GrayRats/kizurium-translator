@@ -82,7 +82,6 @@ depends_x86_64=('python-onnxruntime-cpu')
 optdepends=(
   'grim: screen capture for live translation'
   'slurp: pick a region with the mouse'
-  'quickshell: region picker'
   'wl-clipboard: read the clipboard for --ocr-copy'
   'aria2: faster --pack-install downloads'
   'tesseract-data-jpn: Japanese OCR'

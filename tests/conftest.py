@@ -48,3 +48,35 @@ def _needs_host_precondition(request: pytest.FixtureRequest) -> None:
         pytest.skip(
             f"нет {_HOST_PRECONDITION} - песочница сборки без корня POSIX"
         )
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_config(monkeypatch: pytest.MonkeyPatch, tmp_path_factory) -> None:
+    """Tests read and write a throwaway config, never the user's own.
+
+    ``doctor`` and the settings path load the config, and ``apply_config`` saves it:
+    with the real file a test passed or failed depending on what the user had
+    switched on in Settings that day.
+    """
+    monkeypatch.setenv("KIZURIUM_TRANSLATOR_CONFIG", str(tmp_path_factory.mktemp("cfg") / "config.toml"))
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test must neither start the application nor talk to a running one.
+
+    ``desktop.forward`` goes to the user's session bus: with the app open, a
+    ``--stop`` test would stop the real session. ``desktop.run`` creates a real
+    GApplication, which blocks or aborts the test process. A test that needs
+    either replaces it explicitly.
+    """
+    try:
+        from kizurium_translator import desktop
+    except Exception:  # noqa: BLE001 - tests that do not need it must still run
+        return
+
+    def no_run(*_a, **_k):
+        raise AssertionError("a test started the real application (desktop.run)")
+
+    monkeypatch.setattr(desktop, "forward", lambda _action: False)
+    monkeypatch.setattr(desktop, "run", no_run)

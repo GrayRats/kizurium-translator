@@ -33,6 +33,7 @@ P3_CHANGED_UI = 3
 P4_TRANSIENT = 4
 P5_BACKGROUND = 5
 
+MAX_RETRY_AFTER_S = 120.0
 LOCAL_BATCH_BLOCKS = 8
 LOCAL_BATCH_TOKENS = 512
 
@@ -81,6 +82,7 @@ class Scheduler:
         self._session = "live"
         self._block_content: dict[int, int] = {}
         self._gtx = threading.BoundedSemaphore(1)
+        self._providers = {}
 
     @property
     def revision(self) -> int:
@@ -170,9 +172,123 @@ class Scheduler:
         """Ответ ещё про тот же кадр и ту же ревизию содержимого."""
         return self.accept_identity(request.identity())
 
+    def clear_results(self):
+        with self._lock:
+            lanes = list(self._providers.values())
+        for lane in lanes:
+            with lane.condition:
+                lane.results.clear()
+                lane.disabled.clear()
+
     def online(self):
         """Не больше одного одновременного запроса к gtx."""
         return self._gtx
+
+    def run_provider(self, provider, key, operation, *, cancelled=lambda: False,
+                      interval=1.8, debounce=0.0, status=lambda *_: None, retries=4,
+                      cooldown=25.0):
+        import random
+        import time
+
+        from .providers import ProviderError
+
+        with self._lock:
+            lane = self._providers.setdefault(provider, ProviderQueue())
+        ticket = object()
+
+        def check():
+            if cancelled():
+                raise Cancelled()
+
+        def wait_until(deadline):
+            while deadline > time.monotonic():
+                check()
+                with lane.condition:
+                    lane.condition.wait(min(0.05, deadline - time.monotonic()))
+            check()
+
+        check()
+        status("waiting", 0)
+        with lane.condition:
+            if len(lane.queue) >= 128:
+                raise ProviderError("queue_full")
+            lane.queue.append(ticket)
+        admitted = False
+        try:
+            with lane.condition:
+                while lane.active or lane.queue[0] is not ticket:
+                    check()
+                    lane.condition.wait(0.05)
+                check()
+                if key[0] in lane.disabled:
+                    raise lane.disabled[key[0]]
+                if key in lane.results:
+                    result = lane.results[key]
+                    lane.results.move_to_end(key)
+                    if isinstance(result, ProviderError):
+                        raise result
+                    return result
+                if lane.cooldown_error is not None and time.monotonic() < lane.cooldown_until:
+                    # Retries were just used up: answer at once, no network, no wait.
+                    raise lane.cooldown_error
+                lane.active = admitted = True
+            wait_until(time.monotonic() + max(0, debounce))
+            for attempt in range(retries + 1):
+                wait_until(lane.next_start)
+                check()
+                lane.next_start = time.monotonic() + max(0, interval)
+                try:
+                    result = operation()
+                    check()
+                    with lane.condition:
+                        lane.results[key] = result
+                        lane.cooldown_error = None
+                    return result
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    if isinstance(exc, ProviderError):
+                        error = exc
+                    else:
+                        # Exception strings from HTTP libraries can contain credentials/URLs.
+                        import requests
+
+                        category = "timeout" if isinstance(exc, requests.Timeout) else (
+                            "network" if isinstance(exc, requests.ConnectionError) else "initialization")
+                        error = ProviderError(category)
+                    delay = error.retry_after
+                    if delay is not None and delay > MAX_RETRY_AFTER_S:
+                        # The server asks for a longer pause than is sane to sit
+                        # through: report it instead of blocking the lane.
+                        attempt, delay = retries, MAX_RETRY_AFTER_S
+                    if delay is None:
+                        delay = min(60.0, 2.0 * 2 ** attempt * random.uniform(1.0, 1.25))
+                    if error.retryable:
+                        lane.next_start = max(lane.next_start, time.monotonic() + delay)
+                    check()
+                    status(error.category, attempt)
+                    if not error.retryable or attempt == retries:
+                        with lane.condition:
+                            # A transient failure (429, network) must not be
+                            # remembered: the same text has to be retried later.
+                            if not error.retryable:
+                                lane.results[key] = error
+                            else:
+                                pause = min(MAX_RETRY_AFTER_S, error.retry_after or cooldown)
+                                lane.cooldown_until = time.monotonic() + pause
+                                lane.cooldown_error = error
+                            if error.category in {"authentication", "authentication_or_quota", "quota"}:
+                                lane.disabled[key[0]] = error
+                        raise error from None
+                    status("retrying", attempt + 1)
+        finally:
+            with lane.condition:
+                lane.queue.remove(ticket)
+                if admitted:
+                    lane.active = False
+                while len(lane.results) > 4000:
+                    lane.results.popitem(last=False)
+                lane.condition.notify_all()
 
 
 SCHEDULER = Scheduler()
@@ -199,3 +315,24 @@ def pack_local_batch(items: list[tuple[str, str]]) -> list[list[tuple[str, str]]
     if buf:
         batches.append(buf)
     return batches
+
+
+class Cancelled(Exception):
+    """Obsolete work; no retry and no result publication."""
+
+
+class ProviderQueue:
+    """FIFO admission, coalescing and provider-wide cooldown; no extra worker threads."""
+
+    def __init__(self):
+        from collections import OrderedDict, deque
+
+        self.condition = threading.Condition()
+        self.queue = deque()
+        self.results = OrderedDict()
+        self.active = False
+        self.next_start = 0.0
+        self.cooldown_until = 0.0
+        self.cooldown_error = None
+        self.disabled = {}
+

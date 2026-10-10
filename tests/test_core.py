@@ -97,6 +97,7 @@ class TestCaptureInMemory:
             seen.append(cmd)
             return type("R", (), {"returncode": 0, "stdout": payload, "stderr": b""})()
 
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "sway")
         monkeypatch.setattr(capture.subprocess, "run", fake_run)
         monkeypatch.setattr(capture, "have", lambda _t: True)
         img = capture.capture_image("0,0 12x8")
@@ -104,7 +105,46 @@ class TestCaptureInMemory:
         assert img.size == (12, 8)
         assert img.mode == "RGB"
 
+    def test_kde_uses_kwin_when_it_authorizes_the_app(self, monkeypatch):
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+        monkeypatch.setattr(capture, "_kwin_state", None)
+        monkeypatch.setattr(capture, "kwin_capture", lambda geom: ("kwin", geom))
+        monkeypatch.setattr(capture, "portal_capture", lambda geom: pytest.fail("portal not needed"))
+        assert capture.capture_image("1,2 3x4") == ("kwin", "1,2 3x4")
+        assert capture.capture_backend() == "kwin-screenshot2"
+
+    def test_kde_refusal_goes_to_the_portal_once_and_is_remembered(self, monkeypatch, caplog):
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+        monkeypatch.setattr(capture, "_kwin_state", None)
+        tried = []
+
+        def refused(geom):
+            tried.append(geom)
+            raise capture.KWinNotAuthorized("org.kde.KWin.ScreenShot2.Error.NoAuthorized")
+
+        monkeypatch.setattr(capture, "kwin_capture", refused)
+        monkeypatch.setattr(capture, "portal_capture", lambda geom: ("portal", geom))
+        with caplog.at_level("WARNING"):
+            assert capture.capture_image("1,2 3x4") == ("portal", "1,2 3x4")
+            assert capture.capture_image("5,6 7x8") == ("portal", "5,6 7x8")
+        assert len(tried) == 1, "a refused interface is not called again for every frame"
+        assert "NoAuthorized" in caplog.text, "the refusal is reported, not swallowed"
+        assert "refused" in capture.capture_backend()
+
+    def test_kwin_errors_other_than_authorization_are_not_hidden_by_the_portal(self, monkeypatch):
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+        monkeypatch.setattr(capture, "_kwin_state", None)
+
+        def broken(geom):
+            raise capture.CaptureError("KWin screenshot timed out")
+
+        monkeypatch.setattr(capture, "kwin_capture", broken)
+        monkeypatch.setattr(capture, "portal_capture", lambda geom: pytest.fail("no silent fallback"))
+        with pytest.raises(capture.CaptureError, match="timed out"):
+            capture.capture_image("1,2 3x4")
+
     def test_capture_error_mentions_tool(self, monkeypatch):
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "sway")
         monkeypatch.setattr(capture, "have", lambda _t: False)
         with pytest.raises(capture.CaptureError, match="grim"):
             capture.capture_image("0,0 10x10")

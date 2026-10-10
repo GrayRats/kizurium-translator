@@ -1,3 +1,4 @@
+#!/usr/bin/env xdg-open
 [Desktop Entry]
 Type=Application
 Version=1.0
@@ -5,7 +6,7 @@ Name=Kizurium Translator
 GenericName=Screen Translator
 Comment=Перевод текста на экране через OCR и оверлей Wayland
 Comment[en]=Translate on-screen text with OCR and a Wayland overlay
-Exec=kizurium-translator --toggle
+Exec=kizurium-translator
 TryExec=kizurium-translator
 Icon=kizurium-translator
 Terminal=false
@@ -13,3 +14,53 @@ Categories=Utility;Translation;GTK;
 Keywords=translate;ocr;wayland;overlay;
 StartupNotify=false
 X-AppId=ru.kizurium.translator
+Actions=ShowWindow;TranslatorWindow;CaptureWindow;StartAutoTranslate;StopAutoTranslate;OfflineMode;Settings;Quit;
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2;
+
+[Desktop Action ShowWindow]
+Name=Open Window
+Name[ru]=Открыть окно
+Icon=edit-select-all-symbolic
+Exec=kizurium-translator --action select-region
+
+[Desktop Action TranslatorWindow]
+Name=Translator Window
+Name[ru]=Окно переводчика
+Icon=preferences-desktop-locale-symbolic
+Exec=kizurium-translator --action show-window
+
+[Desktop Action CaptureWindow]
+Name=Select Window to Translate
+Name[ru]=Выбрать окно для перевода
+Icon=window-symbolic
+Exec=kizurium-translator --action capture-window
+
+[Desktop Action StartAutoTranslate]
+Name=Start Auto Translation
+Name[ru]=Запустить автоперевод
+Icon=media-playback-start-symbolic
+Exec=kizurium-translator --action start-auto-translate
+
+[Desktop Action StopAutoTranslate]
+Name=Stop Auto Translation
+Name[ru]=Остановить автоперевод
+Icon=media-playback-stop-symbolic
+Exec=kizurium-translator --action stop-auto-translate
+
+[Desktop Action OfflineMode]
+Name=Toggle Offline Mode
+Name[ru]=Переключить автономный режим
+Icon=network-offline-symbolic
+Exec=kizurium-translator --action toggle-offline
+
+[Desktop Action Settings]
+Name=Settings
+Name[ru]=Настройки
+Icon=preferences-system-symbolic
+Exec=kizurium-translator --action settings
+
+[Desktop Action Quit]
+Name=Quit Kizurium
+Name[ru]=Выход
+Icon=application-exit-symbolic
+Exec=kizurium-translator --action quit

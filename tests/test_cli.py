@@ -166,6 +166,7 @@ class TestUninstall:
         assert "uninstall" in capsys.readouterr().err
 
     def test_uninstall_removes_wrapper_and_venv(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("KIZURIUM_TRANSLATOR_CONFIG", raising=False)  # HOME below is the sandbox
         home = tmp_path / "home"
         data = home / ".local" / "share" / "kizurium-translator"
         venv = data / "venv" / "bin"
@@ -244,27 +245,18 @@ class TestDoctor:
             assert item in out, f"doctor не проверяет {item}"
 
     def test_the_selector_does_not_decide_the_exit_code(self, capsys, monkeypatch):
-        """only the selector needs quickshell.
+        """only the selector needs GTK layer-shell.
 
         It was in REQUIRED_TOOLS, so a machine with everything the overlay needs
-        and no quickshell exited 1 - an optional thing reported as a core failure,
+        and no layer-shell exited 1 - an optional thing reported as a core failure,
         which is the mistake the section split exists to stop.
         """
-        import shutil as _shutil
-
-        real_which = _shutil.which
-
-        def no_quickshell(name, *a, **kw):
-            if name == "quickshell":
-                return None
-            return real_which(name, *a, **kw)
-
-        monkeypatch.setattr("kizurium_translator.cli.shutil.which", no_quickshell)
+        monkeypatch.setattr("kizurium_translator.selector.have_selector", lambda: False)
         code = cli.main(argv("--doctor"))
         out = capsys.readouterr().out
         assert "region selector" in out
         assert "DISABLED" in out, "отсутствие селектора - это DISABLED, а не ERROR"
-        assert "quickshell" not in cli.CORE_TOOLS
+        assert "gtk4-layer-shell" not in cli.CORE_TOOLS
 
     def test_reports_the_429_fallback_as_a_plan_not_a_fact(self, capsys):
         cli.main(argv("--doctor"))
@@ -532,12 +524,12 @@ class TestDispatch:
         monkeypatch.setattr(cli.selector, "have_selector", lambda: True)
 
         def boom(*_a, **_k):
-            raise cli.selector.SelectorError("нет quickshell")
+            raise cli.selector.SelectorError("нет layer-shell")
 
         monkeypatch.setattr(cli.selector, "select_region", boom)
         assert cli.cmd_main_flow(cli.build_parser().parse_args([]), Config()) == 1
 
-    def test_no_quickshell_is_an_error_not_a_different_interface(self, monkeypatch, capsys):
+    def test_no_layer_shell_is_an_error_not_a_different_interface(self, monkeypatch, capsys):
         """slurp plus a three-button window is not the same product.
 
         Falling back silently meant a user who pressed a key expecting the
@@ -550,12 +542,12 @@ class TestDispatch:
         assert cli.cmd_main_flow(cli.build_parser().parse_args([]), Config()) == 1
         assert not seen, "nothing may be drawn when the selector is unavailable"
         err = capsys.readouterr().err
-        assert "Quickshell" in err and "установите" in err.lower() or "Установите" in err
+        assert "gtk4-layer-shell" in err
 
     def test_the_error_names_the_package_to_install(self, monkeypatch, capsys):
         monkeypatch.setattr(cli.selector, "have_selector", lambda: False)
         cli.cmd_main_flow(cli.build_parser().parse_args([]), Config())
-        assert "pacman -S quickshell" in capsys.readouterr().err
+        assert "pacman -S gtk4 gtk4-layer-shell" in capsys.readouterr().err
 
     def test_the_flag_is_gone_from_the_parser(self):
         """There is one way to pick a region.
@@ -574,7 +566,7 @@ class TestDispatch:
         assert not hasattr(cli.ui, "action_menu")
 
     def test_the_default_flow_never_touches_the_simple_path(self, monkeypatch):
-        """Even with quickshell present, the default must not reach for slurp."""
+        """Even with the selector present, the default must not reach for slurp."""
         seen: list[str] = []
         monkeypatch.setattr(cli.selector, "have_selector", lambda: True)
         monkeypatch.setattr(cli.selector, "select_region", lambda: ("live", "0,0 50x50"))
@@ -587,14 +579,14 @@ class TestDispatch:
         assert "slurp" not in cli.CORE_TOOLS
         assert "slurp" in cli.OPTIONAL_TOOLS
 
-    def test_quickshell_is_the_selector_not_the_core(self):
-        """Only the selector needs quickshell; optional is not a core failure.
+    def test_the_selector_has_no_external_tool_in_the_core(self):
+        """The selector is GTK + layer-shell; optional is not a core failure.
 
         It used to be in `REQUIRED_TOOLS`, so a machine with a working live
         overlay and no quickshell got exit code 1 from `--doctor` - the report
         said the product was broken when only one feature was unavailable.
         """
-        assert "quickshell" in cli.SELECTOR_TOOLS
+        assert "quickshell" not in cli.SELECTOR_TOOLS
         assert "quickshell" not in cli.CORE_TOOLS
         assert "grim" in cli.CORE_TOOLS, "без grim оверлею нечего захватывать"
 

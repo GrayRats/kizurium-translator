@@ -6,6 +6,7 @@ and the overlay always gone before the caller starts anything.
 """
 
 import json
+import os
 import re
 import signal
 import subprocess
@@ -29,7 +30,7 @@ class Done0:
 
 
 class FakeProc:
-    """Stand-in for the quickshell shell, so nothing is ever drawn in tests."""
+    """Stand-in for the selector process, so nothing is ever drawn in tests."""
 
     def __init__(self, stopped: list[int] | None = None, pid: int = 4242) -> None:
         self.pid = pid
@@ -74,6 +75,7 @@ def wired(monkeypatch, _state_dir):
     }
 
     monkeypatch.setattr(selector, "_GAP", 0.01)
+    monkeypatch.setattr(selector, "have_selector", lambda: True)
     # Tests must never touch the real runtime directory: the selector writes its
     # start request, log and result files there, and a fake geometry would show
     # up in the user's next selector run.
@@ -130,10 +132,6 @@ def _read_request(root: Path) -> dict:
 def _write_answer(request: dict, payload: dict) -> None:
     """Answer the way the overlay does: write the result file it was given."""
     path = Path(request["result"])
-    if "screen" in payload:
-        Path(request["screen"]).write_text(
-            json.dumps(payload["screen"]), encoding="utf-8"
-        )
     path.write_text(json.dumps(payload.get("result", {})), encoding="utf-8")
 
 
@@ -155,119 +153,14 @@ class TestActions:
     def test_toolbar_offers_ocr_text_live(self):
         assert selector.DEFAULT_ACTIONS == ("ocr", "text", "live")
 
-    def test_live_is_last_and_is_the_return_key_default(self):
-        # The round button is the last toolbar entry and Return maps to it.
-        assert selector.SEL_LIVE == selector.DEFAULT_ACTIONS[-1]
-        source = selector.QML_DIR.joinpath("ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        assert 'sequence: "Return"' in source
-        assert 'root.finish("live")' in source
 
-    def test_buttons_sit_above_the_drag_layer(self):
-        """The drag MouseArea must not cover the buttons.
 
-        It used to sit at z: 50 with the toolbar left at the default 0, so every
-        click landed on the drag layer: the buttons could not be pressed at all
-        and the overlay just sat there. The original has toolbar z: 30, mouse
-        z: 20.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        mouse_at = source.index("acceptedButtons: Qt.LeftButton | Qt.RightButton")
-        window = source[mouse_at : mouse_at + 400]
-        drag_z = int(window.split("z: ")[1].split()[0])
-        # the whole panel carries the z, and both rows sit inside it
-        toolbar_z = int(source.split("id: toolbar")[1].split("z: ")[1].split()[0])
-        assert drag_z < toolbar_z, (drag_z, toolbar_z)
-        # both rows really are inside that panel, so they inherit its z
-        panel = source.split("id: toolbar")[1].split("// ---- interaction")[0]
-        assert "id: bar" in panel and "id: round" in panel
 
-    def test_toolbar_follows_the_selection(self):
-        """The panel has to travel with the selection, not sit on the screen edge.
 
-        It was pinned to the top and bottom of the output, which is nothing like
-        the original, where the whole panel sits under the selection and flips
-        above it when it would not fit.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        panel = source.split("id: toolbar")[1].split("// ---- interaction")[0]
-        # positioned from the selection, in both axes
-        assert "root.selX + (root.selW / 2)" in panel, "panel must centre on the selection"
-        assert "root.selY + root.selH + root.s(15)" in panel, "must sit below the selection"
-        assert "root.selY - height - root.s(15)" in panel, "must flip above it"
-        assert "fitsOutsideBottom" in panel
-        # clamped inside the output
-        assert "Math.max(root.s(10)" in panel
-        # both rows live in the same item, so the panel moves as one piece
-        assert 'id: bar' in panel and 'id: round' in panel
-        # and nothing is pinned to the screen edges any more
-        assert "anchors.top: parent.top" not in panel.split("id: bar")[0].split("Item {")[-1][:200]
 
-    def test_colours_come_from_the_desktop_theme(self):
-        """The original read the generated theme, so it matched the desktop.
-        Now colours are loaded in QML via loadTheme(), using _col() function.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        for key in ("base", "crust", "text", "surface0", "red", "mauve"):
-            assert f'_col("{key}"' in source, key
-        assert "loadTheme" in source
 
-    def test_panel_size_does_not_depend_on_its_children(self):
-        """A width derived from bar.width while bar was anchored to the panel is
-        a binding cycle, and the panel stopped following the selection."""
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        panel = source.split("id: toolbar")[1].split("// ---- interaction")[0]
-        # comments explain the cycle and mention it by name
-        code = "\n".join(l for l in panel.splitlines() if not l.strip().startswith("//"))
-        # The panel's own width must not come from a child it positions.
-        # "toolbar.width" inside the bar is fine; a bare "bar.width" is the cycle.
-        assert not re.search(r"(?<![\w.])bar\.width", code), code[:200]
-        panel_width = [l for l in code.splitlines() if l.strip().startswith("width:")]
-        assert panel_width, "the panel needs an explicit width"
-        assert "root.s(" in panel_width[0], panel_width[0]
 
-    def test_no_hardcoded_screen_size(self):
-        """A 1920x1080 default clamps every selection to a corner of a 4K panel.
 
-        Nothing is measured or drawn before the real output size is known, so
-        the fallback is not a safety net, it is a wrong answer.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        assert "property real mouseW: 1920" not in source
-        assert "property real mouseH: 1080" not in source
-        assert "property real mouseW: 0" in source
-
-    def test_output_size_is_settled_before_geometry_is_restored(self):
-        """restoreGeometry clamps against the size and the scale.
-
-        Doing it first, with a zero size, silently drops the remembered region -
-        which is exactly the "Win+Shift+S forgets my region" symptom.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        # The size is settled in claimScreen(), which is where an output gets
-        # identified: prepare() no longer picks one, because there is a window on
-        # every connected output now.
-        claim = source[source.index("function claimScreen("):]
-        claim = claim[:claim.index("\n    function ")]
-        assert claim.index("mouseW = w") < claim.index("restoreGeometry(")
-        assert claim.index("mouseH = h") < claim.index("restoreGeometry(")
-        # The origin is taken off before the region becomes window-local too.
-        assert claim.index("originX = scr.x") < claim.index("restoreGeometry(")
-
-    def test_begin_does_not_restore_geometry_itself(self):
-        """begin() only delegates: restoring is prepare()'s job, after the size."""
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        begin = source[source.index("function begin("):]
-        begin = begin[:begin.index("\n    function ")]
-        assert "restoreGeometry" not in begin
-        assert "prepare()" in begin
-
-    def test_prepare_schedules_immediate_restore(self):
-        """Previous region must appear without waiting for a click."""
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        assert "function autoRestoreRemembered()" in source
-        prepare = source[source.index("function prepare()"):]
-        prepare = prepare[:prepare.index("\n    function ")]
-        assert "autoRestoreRemembered" in prepare
 
     def test_selection_is_remembered_between_runs(self, wired):
         """Win+Shift+S starts with the previous region; so must this."""
@@ -386,28 +279,7 @@ class TestActions:
     def test_the_remembered_file_is_under_the_runtime_directory(self, wired, tmp_path):
         assert tmp_path in selector.geometry_file().parents
 
-    def test_watchdog_closes_the_overlay_by_itself(self):
-        """The overlay gives up on its own if the Python side never comes back.
 
-        Otherwise a killed process leaves a fullscreen overlay holding the
-        keyboard with nothing left able to dismiss it.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        assert "id: watchdog" in source
-        assert "onTriggered: root.close()" in source
-        assert "running: root.active" in source
-        assert 0 < selector.WATCHDOG_S <= selector.DEFAULT_TIMEOUT_S
-
-    def test_escape_works_as_an_application_shortcut(self):
-        """A layer surface does not reliably own the focus chain.
-
-        With the default window context Escape arrived nowhere; the shortcuts have
-        to be application-wide.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        for key in ("Escape", "Return", "F11"):
-            assert f'sequence: "{key}"' in source, key
-        assert source.count("context: Qt.ApplicationShortcut") == 3
 
     def test_a_busy_path_is_closed_instead_of_failing(self, wired):
         """-n makes quickshell exit at once if another shell owns the path.
@@ -444,35 +316,28 @@ class TestActions:
     def test_cancel_is_empty(self):
         assert selector.SEL_CANCEL == ""
 
-    def test_every_action_has_a_button_in_the_qml(self):
-        source = selector.QML_DIR.joinpath("ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        for action in ("ocr", "text", "live"):
-            assert f'root.finish("{action}")' in source, action
 
 
 class TestPresence:
-    def test_have_selector_false_without_quickshell(self, monkeypatch):
-        monkeypatch.setattr(selector.shutil, "which", lambda _t: None)
-        assert selector.have_selector() is False
+    def test_have_selector_false_without_layer_shell(self, monkeypatch):
+        import gi
 
-    def test_have_selector_false_without_qml(self, monkeypatch):
-        monkeypatch.setattr(selector.shutil, "which", lambda _t: "/usr/bin/quickshell")
-        monkeypatch.setattr(selector, "QML_DIR", Path("/nonexistent"))
+        def missing(name, version):
+            if name == "Gtk4LayerShell":
+                raise ValueError("Namespace Gtk4LayerShell not available")
+
+        monkeypatch.setattr(gi, "require_version", missing)
         assert selector.have_selector() is False
 
     def test_error_names_the_package_to_install(self, monkeypatch):
-        monkeypatch.setattr(selector.shutil, "which", lambda _t: None)
-        with pytest.raises(selector.SelectorError, match="quickshell"):
+        monkeypatch.setattr(selector, "have_selector", lambda: False)
+        with pytest.raises(selector.SelectorError, match="gtk4-layer-shell"):
             selector.select_region()
 
-    def test_qml_ships_with_the_package(self):
-        for name in ("shell.qml", "ScreenshotOverlay.qml", "qmldir"):
-            assert (selector.QML_DIR / name).is_file(), name
-        # The QML has to live inside the installed package, not in the repo
-        # root: a repo-root path exists in development and is missing from
-        # site-packages, and the installed command then falls back to slurp.
+    def test_the_selector_is_gtk_not_qml(self):
         package_dir = Path(selector.__file__).resolve().parent
-        assert selector.QML_DIR.is_relative_to(package_dir)
+        assert (package_dir / "gtk_selector.py").is_file()
+        assert not (package_dir / "qml").exists()
 
 
 class TestNoHarm:
@@ -493,18 +358,12 @@ class TestNoHarm:
         assert "ipc" not in pops[0], pops
         assert not [c for c in runs if "ipc" in c], runs
 
-    def test_started_with_its_own_path(self, wired):
-        """-p, never -c and never the bare binary.
 
-        Without -p quickshell would load the user's own config, which is exactly
-        what must not happen.
-        """
+    def test_started_as_the_gtk_module_with_an_absolute_pythonpath(self, wired):
         selector.select_region(timeout_s=0.2)
-        pops = wired["pops"]
-        assert "-p" in pops[0]
-        assert str(selector.QML_DIR) in pops[0]
-        assert "-c" not in pops[0]
-        assert "-n" in pops[0], "-n keeps a second press from stacking an overlay"
+        cmd, kw = wired["pops"][0], wired["kwargs"][0]
+        assert cmd[1:3] == ["-m", selector.GTK_SELECTOR]
+        assert all(os.path.isabs(p) for p in kw["env"]["PYTHONPATH"].split(os.pathsep))
 
     def test_never_kills_by_process_name(self):
         source = Path(selector.__file__).read_text(encoding="utf-8")
@@ -563,7 +422,7 @@ class TestNoHarm:
         assert selector.select_region(timeout_s=0.3) == ("", "")
         assert not stopped
 
-    def test_single_instance_lock(self, wired):
+    def test_single_instance_lock(self, wired, tmp_path):
         """A second press cancels the first instead of stacking an overlay."""
         assert selector._Single().__enter__() is True
 
@@ -574,11 +433,10 @@ class TestNoHarm:
         assert second.__enter__() is False
         second.__exit__()
 
-        runs: list = wired["runs"]  # type: ignore[assignment]
-        runs.clear()
         action, geom = selector.select_region(timeout_s=0.3)
         assert (action, geom) == ("", "")
-        assert any("cancel" in c for c in runs), runs
+        assert (tmp_path / "selector-cancel").exists(), "the running overlay is told to close"
+        assert not wired["pops"], "no second overlay is started"
         held.__exit__()
 
     def test_frame_and_result_files_are_cleaned_up(self, wired, tmp_path):
@@ -641,35 +499,10 @@ class TestOutput:
         )
         assert "grim" not in code
 
-    def test_a_healthy_frame_reports_nothing(self, tmp_path):
-        report = tmp_path / "screen.json"
-        report.write_text(json.dumps({"name": "DP-1", "frame": "ok"}), encoding="utf-8")
-        assert selector._frame_problem(report) == ""
 
-    def test_a_failed_frame_is_reported_not_swallowed(self, tmp_path):
-        report = tmp_path / "screen.json"
-        report.write_text(
-            json.dumps({"name": "DP-1", "frame": "failed"}), encoding="utf-8"
-        )
-        problem = selector._frame_problem(report)
-        assert "DP-1" in problem and "не удался" in problem
 
-    def test_broken_json_does_not_raise(self, tmp_path):
-        report = tmp_path / "screen.json"
-        report.write_text("{not json", encoding="utf-8")
-        assert selector._frame_problem(report) == ""
 
-    def test_a_missing_report_does_not_raise(self, tmp_path):
-        assert selector._frame_problem(tmp_path / "absent.json") == ""
 
-    def test_a_failed_frame_reaches_the_log(self, wired, tmp_path):
-        wired["answer"] = {
-            "screen": {"name": "DP-1", "x": 0, "y": 0, "frame": "failed"},
-            "result": {"action": "ocr", "geometry": "0,0 8x8", "done": True},
-        }
-        selector.select_region(timeout_s=5)
-        log = (tmp_path / "selector.log").read_text(encoding="utf-8")
-        assert "не удался" in log
 
 
 class TestProcessModel:
@@ -721,7 +554,7 @@ class TestProcessModel:
         wired["answer"] = {"result": {"action": "ocr", "geometry": "0,0 8x8", "done": True}}
         selector.select_region(timeout_s=5)
         request = wired["requests"][0]
-        for key in ("result", "screen", "frame", "watchdogMs", "autoAction"):
+        for key in ("result", "cancel", "geometries", "watchdogMs", "autoAction"):
             assert key in request, request
         assert request["watchdogMs"] > 0
         assert request["autoAction"] == ""
@@ -771,69 +604,6 @@ class TestProcessModel:
         wired["answer"] = {"result": {"action": "text", "geometry": "0,0 8x8", "done": True}}
         assert selector.select_region(timeout_s=5) == ("text", "0,0 8x8")
 
-    def test_the_overlay_reports_whether_it_restored_a_region(self):
-        """A restored region has to be observable from outside.
 
-        Whether the per-output lookup worked is invisible from the result: a run
-        that correctly restores and a run that correctly declines to both answer
-        with an empty geometry. The screen report is what makes it checkable.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        assert "restored: hasSelection" in source
-        # The report must come after the restore, or the flag is always false.
-        claim = source[source.index("function claimScreen("):]
-        claim = claim[:claim.index("\n    function ")]
-        assert claim.index("restoreGeometry(") < claim.index("writeScreenReport(")
 
-    def test_the_output_key_helper_is_not_shadowed_by_a_property(self):
-        """A property named outputKey silently replaced the function of that name.
 
-        QML resolves a call against the property first, so `outputKey(scr)` threw
-        "Property 'outputKey' is not a function" at run time. Nothing about it
-        shows up in qmllint, and the overlay only fails once the request arrives.
-        """
-        source = (selector.QML_DIR / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        assert "function outputKey(" not in source
-        assert "property string outputKey" not in source
-        assert "function outputKeyOf(" in source
-        # and the property that carries the value is named differently again
-        assert "property string currentOutput" in source
-
-    def test_the_request_is_read_as_a_method_call(self):
-        """FileView.text is a function in this Quickshell version.
-
-        Reading it as a property hands JSON.parse a function object, the throw is
-        swallowed, and the overlay silently never starts: the run then just times
-        out with nothing on screen and no error anywhere.
-        """
-        source = (Path(selector.__file__).parent / "qml" / "selector"
-                  / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        assert "JSON.parse(text)" not in source
-        assert "JSON.parse(body)" in source
-        assert "JSON.parse(text())" in source
-
-    def test_the_frame_is_captured_after_the_output_is_claimed(self):
-        """grim снимает тот выход, который завладел прогоном.
-
-        Раньше кадр снимался в prepare(), до `active = true`: снимок делается
-        grim, а если окно уже отображено, в снимок попадает собственный слой
-        затемнения выделятеля, и пользователь выделяет область на картинке
-        селектора, а не экрана.
-
-        Окна теперь по одному на каждый выход, и до показа неизвестно, на каком
-        окажется нажатие, поэтому снимок уходит в claimScreen() - то есть после
-        отображения. Это допустимо только потому, что снимок наружу не
-        показывается: `showFrozenFrame` не включается нигде, и кадр уходит на
-        --frame и в лог. Если его когда-нибудь начнут рисовать, этот порядок
-        придётся пересмотреть, и вот тогда тест должен упасть.
-        """
-        source = (Path(selector.__file__).parent / "qml" / "selector"
-                  / "ScreenshotOverlay.qml").read_text(encoding="utf-8")
-        claim = source[source.index("function claimScreen("):]
-        claim = claim[:claim.index("\n    function ")]
-        assert "captureFrame(scr)" in claim
-        # Рамка рисуется в окне-владельце: без владения нажать не на что, и
-        # выглядит как «выделятель не открылся».
-        assert "visible: !root.hasSelection" in source
-        # Нигде не включается показ снимка - иначе порядок выше был бы неправдой.
-        assert source.count("root.showFrozenFrame") == 2, "showFrozenFrame стал включаться"

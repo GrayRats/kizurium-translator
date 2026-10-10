@@ -888,7 +888,23 @@ class Translator:
         glossary: dict[str, str] | None = None,
         log: Callable[[str], None] | None = None,
         session_factory: Callable[[], object] | None = None,
+        provider: str | None = None,
+        provider_options: dict | None = None,
+        request_interval: float = 1.8,
+        ocr_debounce: float = 0.38,
+        model_path: str = "",
     ) -> None:
+        self.provider_id = provider or "google"
+        self.explicit_provider = provider is not None
+        self.provider_options = dict(provider_options or {})
+        self.request_interval = request_interval
+        self.ocr_debounce = ocr_debounce
+        self.model_path = model_path
+        self._cancelled = threading.Event()
+        self._generation = 0
+        self.status = ""
+        self.status_callback = None
+        self._provider = None
         self.target = target or "ru"
         self.source = source or "auto"
         self.offline_only = bool(offline_only)
@@ -899,6 +915,11 @@ class Translator:
         self.cooldown_s = cooldown_s
         self.glossary = {str(k): str(v) for k, v in (glossary or {}).items()}
         self.glossary_version = _glossary_version(self.glossary)
+        if self.explicit_provider:
+            import hashlib
+            import json
+            identity = json.dumps([self.provider_id, self.provider_options, model_path], sort_keys=True)
+            self.glossary_version += ":" + hashlib.sha256(identity.encode()).hexdigest()[:16]
         self._log = log or (lambda _msg: None)
         self._session_factory = None if self.offline_only else session_factory
         self._session = None
@@ -995,39 +1016,118 @@ class Translator:
             return ""
         if not (text or "").strip():
             return ""
-        now = time.monotonic()
-        with self._lock:
-            if now < self._cooldown_until:
-                return ""
-        http = self._http()
-        if http is None:
-            return ""
-        from .translation.online import gtx_request
-        from .translation.scheduler import SCHEDULER
+        return self.via_provider(text, source)
 
+    def _status(self, category, attempt=0):
+        labels = {
+            "waiting": "Waiting for translation",
+            "rate_limit": "Rate limit exceeded",
+            "retrying": "Retrying translation",
+            "unavailable": "Translation service unavailable",
+            "network": "Translation service unavailable",
+            "timeout": "Translation service unavailable",
+            "authentication": "Translation failed: invalid or missing credentials",
+            "authentication_or_quota": "Translation failed: authentication or quota exhausted",
+            "quota": "Translation failed: quota exhausted",
+            "offline": "Offline mode: selected online provider is unavailable",
+            "ready": "Ready",
+        }
+        self.status = labels.get(category, "Translation failed: " + category)
+        self._log_msg(f"provider={self.provider_id} operation=translate category={category} attempt={attempt}")
+        if self.status_callback:
+            self.status_callback(self.status)
+
+    def via_provider(self, text: str, source: str | None = None) -> str:
+        from .translation.providers import HTTPProvider, ProviderError
+        from .translation.scheduler import SCHEDULER, Cancelled
+
+        if self.offline_only and self.provider_id != "bergamot":
+            self._status("offline")
+            return ""
+        src = source or self.source
+        revision = SCHEDULER.capture()
+        generation = self._generation
+        target = self.target
+        cancel = lambda: self._cancelled.is_set() or generation != self._generation or SCHEDULER.stale(revision)
         try:
-            with SCHEDULER.online():
-                resp = gtx_request(http, text, source or self.source, self.target)
-        except Exception as exc:  # noqa: BLE001 - any transport error is a miss
-            self._log_msg(f"gtx-fail {type(exc).__name__}")
+            if self._provider is None:
+                with self._lock:
+                    if self._provider is None:
+                        if self.provider_id == "bergamot":
+                            from .translation.bergamot import BergamotProvider
+                            self._provider = BergamotProvider(self.model_path, self._status)
+                        else:
+                            self._provider = HTTPProvider(self.provider_id, self.provider_options)
+            provider = self._provider
+            if self.provider_id == "bergamot" and src in ("", "auto"):
+                # A local model is for one pair, so the source has to be known.
+                src = self.resolve_source(text)
+                if src in ("", "auto"):
+                    raise ProviderError(
+                        "unsupported_pair",
+                        detail="Bergamot: не удалось определить язык текста, задайте исходный язык в настройках")
+            # The configuration leads the key: a new API key, endpoint or model
+            # must not inherit cached answers or a "bad credentials" verdict
+            # earned by the previous one.
+            key = (self._config_fingerprint(), self.glossary_version, src, target, text.strip())
+            def operation():
+                if cancel():
+                    raise Cancelled()
+                if self.offline_only and provider.requires_network:
+                    raise Cancelled()
+                return provider.translate(self._http() if provider.requires_network else None,
+                                          text, src, target)
+            got = SCHEDULER.run_provider(
+                self.provider_id, key, operation, cancelled=cancel,
+                interval=self.request_interval if provider.requires_network else 0,
+                debounce=self.ocr_debounce, status=self._status,
+                cooldown=self.cooldown_s)
+            self._status("ready")
+            return got
+        except Cancelled:
             return ""
-        if getattr(resp, "status_code", 0) == 429:
-            with self._lock:
-                self._cooldown_until = time.monotonic() + self.cooldown_s
-            self._log_msg(f"gtx=429 cooldown={self.cooldown_s:.0f}s")
+        except ProviderError as exc:
+            self._status(exc.category)
+            self._log_msg(f"provider={self.provider_id} operation=translate category={exc.category} HTTP={exc.status}")
+            if exc.detail:
+                # The reason, not just the category, is what the user can act on.
+                self.status = exc.detail
+                if self.status_callback:
+                    self.status_callback(exc.detail)
             return ""
-        try:
-            if resp.status_code != 200:  # type: ignore[attr-defined]
-                return ""
-            data = resp.json()  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
+        except Exception as exc:
+            self._status("initialization")
+            self._log_msg(f"provider={self.provider_id} operation=initialize error={type(exc).__name__}")
             return ""
-        if not data or not data[0]:
-            return ""
-        return "".join(part[0] for part in data[0] if part and part[0]).strip()
+
+    def _config_fingerprint(self) -> str:
+        import hashlib
+        import json
+
+        raw = json.dumps([self.provider_id, self.provider_options, self.model_path],
+                         sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def cancel_pending(self):
+        self._generation += 1
+
+    def cancel(self):
+        self._cancelled.set()
+
+    def shutdown(self):
+        self.cancel()
+        self.cache_flush(force=True)
+        # Session.close releases idle connections. Active requests have finite deadlines
+        # and their responses are discarded by the scheduler.
+        if self._session is not None and hasattr(self._session, "close"):
+            self._session.close()
+        if self._provider is not None:
+            self._provider.shutdown()
 
     def via_local(self, text: str, source: str | None = None, *, beam_size: int = 1) -> str:
         """CTranslate2 OPUS-MT pack, when installed"""
+        if self.explicit_provider:
+            return ""
         if not (text or "").strip():
             return ""
         src = source or self.source or "auto"
@@ -1056,23 +1156,7 @@ class Translator:
 
     def _slow_translate(self, text: str, source: str) -> str:
         """Медленные бэкенды: MyMemory и (если Google не в бане) deep-translator."""
-        if self.offline_only:
-            return ""
-        from .translation.online import slow_backends
-
-        cooling = self.gtx_cooling()
-        for backend in slow_backends(skip_google=cooling):
-            if not backend.supports(source, self.target):
-                continue
-            try:
-                got = backend.translate([text], source, self.target)[0]
-            except Exception as exc:  # noqa: BLE001
-                self._log_msg(f"{backend.backend_id}-fail {type(exc).__name__}")
-                continue
-            if got:
-                if cooling:
-                    self._log_msg(f"gtx-cooldown → {backend.backend_id}")
-                return got.strip()
+        # Provider selection is explicit; never bypass a provider error via another endpoint.
         return ""
 
     # -- public API -------------------------------------------------------
@@ -1093,8 +1177,12 @@ class Translator:
 
     def translate(self, text: str, *, source: str | None = None, allow_slow: bool | None = None) -> str:
         """Translate one string. Returns ``""`` when nothing usable came back."""
+        generation = self._generation
         text = (text or "").strip()
-        if not text:
+        if self._cancelled.is_set() or not text:
+            return ""
+        if self.explicit_provider and self.offline_only and self.provider_id != "bergamot":
+            self._status("offline")
             return ""
         if len(text) > self.max_chars:
             return ""
@@ -1120,7 +1208,7 @@ class Translator:
         # Translation memory is a curation surface, separate from the hot cache.
         # A hit here still is not a glossary entry until the user promotes it.
         try:
-            remembered = self._memory().lookup(text, source_lang=src, target_lang=self.target)
+            remembered = "" if self.explicit_provider else self._memory().lookup(text, source_lang=src, target_lang=self.target)
             if remembered and (
                 is_error_response(text, remembered, self.target)
                 or translation_dropped_tail(text, remembered)
@@ -1164,13 +1252,13 @@ class Translator:
             # Kept the first clause, dropped "No matter…" — English ghosts under card.
             self._log_msg("local-drop truncated-tail")
             got = ""
-        if not got and self.offline_only:
+        if not got and self.offline_only and self.provider_id != "bergamot":
             # Better than catching network errors: online backends were never built.
             self._log_msg(f"{LANGUAGE_PACK_NOT_INSTALLED} ({src}->{self.target})")
             return ""
         if not got:
-            got = self.via_gtx(protected, src)
-            backend_id = "gtx"
+            got = self.via_provider(protected, src) if self.provider_id != "google" else self.via_gtx(protected, src)
+            backend_id = self.provider_id
         if got and names and not placeholders_survived(got, names):
             self._log_msg(f"{backend_id}-drop placeholder-lost")
             got = ""
@@ -1192,20 +1280,18 @@ class Translator:
         # also what would make a real translation of a sentence look unchanged.
         if got and normalize_for_compare(got) == normalize_for_compare(text):
             got = ""
+        if self._cancelled.is_set() or generation != self._generation:
+            return ""
         if got and not is_error_response(text, got, self.target):
             self._cache.put(key, got, glossary_version=self.glossary_version)
             self._cache.flush()
             self._remember(text, got, src, backend_id)
             return got
 
-        # gtx cooldown (429) is not "user opted into slow": it is Google saying
-        # stop. Without a fallback the overlay only shows glossary hits, which
-        # looks like "translations disappeared". MyMemory covers that gap.
-        # offline_only never reaches here for local misses (early return above).
         if self.offline_only:
             return ""
         slow = self.allow_slow if allow_slow is None else allow_slow
-        if slow or self.gtx_cooling() or not self.use_gtx:
+        if slow and not self.explicit_provider and not self.gtx_cooling():
             got = self._slow_translate(protected, src)
             backend_id = "mymemory"
             # The slow path used to restore names and paths but never check that
