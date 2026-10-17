@@ -25,7 +25,6 @@ from PIL import Image, ImageChops, ImageStat
 from ..core.models import (  # noqa: F401
     boxes_overlap,
 )
-from ..native import tile_reductions
 from .runtime import (  # noqa: F401
     SETTINGS,
 )
@@ -125,14 +124,6 @@ def dirty_tile_coords(
     diff = ImageChops.difference(a.convert("L"), b.convert("L"))
     nw, nh = diff.size
     ts = max(4, int(tile_size))
-    reductions = tile_reductions(diff, tile_size=ts, pixel_threshold=pixel_threshold)
-    if reductions is not None:
-        columns = (nw + ts - 1) // ts
-        return {
-            (index % columns, index // columns)
-            for index, (mean, frac) in enumerate(reductions)
-            if frac >= dirty_fraction or mean >= pixel_threshold
-        }
     dirty: set[tuple[int, int]] = set()
     for ty, y1 in enumerate(range(0, nh, ts)):
         for tx, x1 in enumerate(range(0, nw, ts)):
@@ -338,12 +329,6 @@ def _tile_stats(
 ) -> tuple[float, float]:
     nw, nh = diff.size
     ts = max(4, int(tile_size))
-    reductions = tile_reductions(diff, tile_size=ts, pixel_threshold=pixel_threshold)
-    if reductions is not None:
-        return (
-            max((mean for mean, _frac in reductions), default=0.0),
-            max((frac for _mean, frac in reductions), default=0.0),
-        )
     max_mean = 0.0
     max_frac = 0.0
     for y1 in range(0, nh, ts):

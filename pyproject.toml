@@ -64,8 +64,6 @@ all = [
 ]
 
 [dependency-groups]
-# Build the optional native/ companion wheel; the GTK application remains pure Python.
-native-build = ["maturin>=1.14,<2"]
 # Lint, type and dead-code tools used during development.
 dev = [
   "ruff>=0.6",
@@ -102,7 +100,7 @@ artifacts = [
 # having in the repository, where they are what a reader sees, and not worth
 # shipping to a machine that installs the package and will never open the README
 # from disk.
-exclude = ["assets/screenshots/**", "native/target/**", "native/dist/**", ".tools/**", ".cache/**"]
+exclude = ["assets/screenshots/**"]
 
 [tool.uv]
 # Reminder: `uv sync` on its own creates a venv WITHOUT system site packages,

@@ -15,14 +15,12 @@ DESCRIPTIONS = {
     "bergamot": "Bergamot: локальный перевод без сети. Нужны native runtime и совместимая модель для выбранной пары.",
 }
 
-_STYLE_INSTALLED = False
-
 
 class SettingsWindow:
     def __init__(self, controller):
         from .ui import _gtk
 
-        Gtk, Gdk, _ = _gtk()
+        Gtk, _, _ = _gtk()
         self.Gtk, self.controller = Gtk, controller
         self.fields = {}
         self.provider_fields = {}
@@ -30,64 +28,31 @@ class SettingsWindow:
         self._shown_provider = None
         cfg = controller.conf
         self.win = Gtk.ApplicationWindow(application=controller.app, title="Kizurium — Настройки")
-        self.win.add_css_class("kizurium-settings")
         self.win.set_default_size(560, 520)
-        global _STYLE_INSTALLED
-        if not _STYLE_INSTALLED:
-            css = Gtk.CssProvider()
-            css.load_from_data(b"""
-                window.kizurium-settings .settings-page { padding: 4px; }
-                window.kizurium-settings .settings-row {
-                    padding: 8px 10px;
-                    border: 1px solid @borders;
-                    border-radius: 8px;
-                }
-            """)
-            Gtk.StyleContext.add_provider_for_display(
-                Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-            )
-            _STYLE_INSTALLED = True
-        from . import window_state
-
-        window_state.restore(self.win, "settings")
-        header = Gtk.HeaderBar()
-        title = Gtk.Label(label="Настройки")
-        title.add_css_class("title")
-        header.set_title_widget(title)
-        apply = Gtk.Button(label="Применить")
-        apply.add_css_class("suggested-action")
-        apply.set_tooltip_text("Сохранить и применить настройки")
-        apply.connect("clicked", self.apply)
-        header.pack_end(apply)
-        self.win.set_titlebar(header)
-
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         for edge in ("top", "bottom", "start", "end"):
-            getattr(root, "set_margin_" + edge)(12)
+            getattr(root, "set_margin_" + edge)(16)
         self.win.set_child(root)
-        stack = Gtk.Stack()
-        stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        stack.set_transition_duration(120)
-        stack.set_vexpand(True)
-        switcher = Gtk.StackSwitcher(stack=stack)
-        switcher.set_halign(Gtk.Align.CENTER)
-        root.append(switcher)
-        root.append(stack)
+        notebook = Gtk.Notebook()
+        notebook.set_scrollable(True)
+        notebook.set_vexpand(True)
+        root.append(notebook)
         self.note = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        self.note.add_css_class("dim-label")
         root.append(self.note)
-        self._page_index = 0
+        footer = Gtk.Box(spacing=8)
+        apply = Gtk.Button(label="Применить")
+        apply.connect("clicked", self.apply)
+        footer.append(apply)
+        root.append(footer)
 
         def page(name):
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            box.add_css_class("settings-page")
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
             for edge in ("top", "bottom", "start", "end"):
-                getattr(box, "set_margin_" + edge)(8)
+                getattr(box, "set_margin_" + edge)(12)
             scroll = Gtk.ScrolledWindow()
             scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
             scroll.set_child(box)
-            self._page_index += 1
-            stack.add_titled(scroll, f"settings-{self._page_index}", name)
+            notebook.append_page(scroll, Gtk.Label(label=name))
             return box
 
         general = page("Общие")
@@ -133,7 +98,7 @@ class SettingsWindow:
         self.provider_changed()
         self.button(translation, "Проверить соединение (перевод Test)", self.test_connection)
 
-        models = page("Модели")
+        models = page("Локальные модели")
         self.entry(models, "bergamot_model_path", "Путь к модели Bergamot", cfg.bergamot_model_path, "Каталог с kizurium-model.json, конфигурацией и файлами модели; выше приоритетом, чем кэш")
         self.button(models, "Выбрать каталог модели…", self.choose_model)
         models.append(Gtk.Label(label="Пара языков берётся из вкладки «Перевод». Для локальной модели укажите исходный язык явно.", wrap=True, xalign=0))
@@ -161,7 +126,7 @@ class SettingsWindow:
         controller.settings_listeners.append(self.sync_runtime_actions)
         self.scan_runtime()
 
-        appearance = page("Вид")
+        appearance = page("Внешний вид")
         appearance.append(Gtk.Label(label="Существующий оверлей сохраняет геометрию и автоматически подбирает типографику под текст на экране.", wrap=True, xalign=0))
         for key, label in (("card_bg", "Фон RGBA (0…1)"), ("card_fg", "Текст RGBA (0…1)")):
             self.entry(appearance, key, label, json.dumps(getattr(cfg, key)), "Четыре числа: [R, G, B, A]")
@@ -170,15 +135,12 @@ class SettingsWindow:
         self.outline.set_active(cfg.card_outline)
         appearance.append(self.outline)
 
-        advanced = page("Ещё")
+        advanced = page("Дополнительно")
         self.button(advanced, "Очистить кэш переводов", lambda _b: controller.clear_cache())
         self.button(advanced, "Диагностика", self.diagnostics)
         self.diagnostic_text = Gtk.Label(wrap=True, selectable=True, xalign=0)
         advanced.append(self.diagnostic_text)
         self.win.connect("close-request", self.close)
-        controller.app.connect(
-            "shutdown", lambda *_: window_state.remember(self.win, "settings")
-        )
 
     def set_auto_active(self, active):
         self.auto.handler_block(self._auto_handler)
@@ -188,9 +150,6 @@ class SettingsWindow:
             self.auto.handler_unblock(self._auto_handler)
 
     def close(self, *_):
-        from . import window_state
-
-        window_state.remember(self.win, "settings")
         self.win.set_visible(False)
         return True
 
@@ -201,47 +160,21 @@ class SettingsWindow:
         return button
 
     def entry(self, box, key, label, value, tooltip="", password=False, fields=None):
-        row = self.Gtk.Box(orientation=self.Gtk.Orientation.HORIZONTAL, spacing=12)
-        row.add_css_class("settings-row")
-        caption = self.Gtk.Label(label=label, xalign=0, yalign=0.5, wrap=True)
-        caption.set_size_request(180, -1)
-        caption.set_hexpand(False)
-        row.append(caption)
-        numeric = {
-            "request_interval": (3600.0, 0.1, 2),
-            "ocr_debounce": (60.0, 0.05, 2),
-            "card_radius": (128.0, 0.1, 2),
-        }.get(key)
-        if numeric:
-            upper, step, digits = numeric
-            current = float(value)
-            upper = max(upper, current)
-            adjustment = self.Gtk.Adjustment.new(current, 0.0, upper, step, step * 10, 0.0)
-            widget = self.Gtk.SpinButton(adjustment=adjustment, climb_rate=step, digits=digits)
-            widget.set_numeric(True)
-            widget.set_hexpand(True)
-        else:
-            widget = self.Gtk.Entry()
-            widget.set_text(str(value))
-            widget.set_visibility(not password)
+        box.append(self.Gtk.Label(label=label, xalign=0, wrap=True))
+        widget = self.Gtk.Entry()
+        widget.set_text(str(value))
+        widget.set_visibility(not password)
         widget.set_tooltip_text(tooltip)
         widget.set_hexpand(True)
-        row.append(widget)
-        box.append(row)
+        box.append(widget)
         (self.fields if fields is None else fields)[key] = widget
         return widget
 
     def dropdown(self, box, label, values, selected):
-        row = self.Gtk.Box(orientation=self.Gtk.Orientation.HORIZONTAL, spacing=12)
-        row.add_css_class("settings-row")
-        caption = self.Gtk.Label(label=label, xalign=0, yalign=0.5, wrap=True)
-        caption.set_size_request(180, -1)
-        row.append(caption)
+        box.append(self.Gtk.Label(label=label, xalign=0, wrap=True))
         dropdown = self.Gtk.DropDown.new_from_strings(values)
         dropdown.set_selected(selected)
-        dropdown.set_hexpand(True)
-        row.append(dropdown)
-        box.append(row)
+        box.append(dropdown)
         return dropdown
 
     def provider_changed(self, *_):
@@ -278,7 +211,7 @@ class SettingsWindow:
         cfg = self.controller.conf
         changes = {key: self.fields[key].get_text().strip() for key in ("source_lang", "target_lang", "ocr_language", "bergamot_model_path")}
         for key in ("request_interval", "ocr_debounce", "card_radius"):
-            changes[key] = self.fields[key].get_value()
+            changes[key] = float(self.fields[key].get_text())
         for key in ("card_bg", "card_fg"):
             changes[key] = tuple(json.loads(self.fields[key].get_text()))
         changes["card_outline"] = self.outline.get_active()
@@ -345,7 +278,7 @@ class SettingsWindow:
         self.runtime_button.set_sensitive(online and not self._runtime_busy and not self._runtime_found)
         self.runtime_refresh.set_sensitive(not self._runtime_busy)
         for button in self.download_buttons:
-            button.set_sensitive(online and not self._runtime_busy)
+            button.set_sensitive(online and self._runtime_found and not self._runtime_busy)
 
     def scan_runtime(self, *_):
         if self._runtime_busy:

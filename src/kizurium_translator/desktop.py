@@ -39,6 +39,7 @@ class DesktopController:
         self.pending_start = False
         self._starting = False
         self._selection_revision = 0
+        self._portal_parent_surface = None
         self.models = ModelManager(lambda: self.conf.offline_only, self.model_changed)
         live.configure(conf)
         self.translator = live.runtime.translator()
@@ -177,13 +178,6 @@ class DesktopController:
         finally:
             self.sync_auto()
 
-    def activate(self):
-        """An incidental app activation must not interrupt an active region session."""
-        if (self.closing or self.live is not None or self.pending_start
-                or self._starting or self.selecting):
-            return
-        self.dispatch("show-window")
-
     def open_selector(self):
         """The normal region selector, answered with the action chosen on its toolbar."""
         if self.selecting or self.closing:
@@ -281,10 +275,17 @@ class DesktopController:
             return
         from . import capture
         if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "") and not capture.portal_ready():
-            # Portal consent can be requested without a parent window. Starting
-            # a region must never create/present the text translator as a side effect.
+            # Authorize before creating the click-through layer. Parent the
+            # portal to a presented regular toplevel instead of an empty handle
+            # behind the fullscreen game.
+            import gi
+            gi.require_version("GdkWayland", "4.0")
+            from gi.repository import GdkWayland
+
             self._starting = self.pending_start = True
-            capture.set_portal_parent("")
+            self.dispatch("show-window")
+            self.text_window.present()
+            surface = self.text_window.get_surface()
 
             def prepared(result):
                 self._starting = False
@@ -296,6 +297,7 @@ class DesktopController:
                 if not ok:
                     self.message("Захват недоступен: " + error)
                     return
+                self.text_window.set_visible(False)
                 self._start_live_now()
 
             def warmup():
@@ -305,7 +307,20 @@ class DesktopController:
                 except capture.CaptureError as exc:
                     return False, str(exc)
 
-            self.background(warmup, prepared)
+            def exported(_surface, handle, *_):
+                capture.set_portal_parent("wayland:" + handle)
+                if self.pending_start and not self.closing:
+                    self.background(warmup, prepared)
+                else:
+                    self._starting = False
+
+            if self._portal_parent_surface is not None:
+                self._portal_parent_surface.unexport_handle()
+            self._portal_parent_surface = surface
+            if not isinstance(surface, GdkWayland.WaylandToplevel) or not surface.export_handle(exported):
+                self._starting = False
+                self.pending_start = False
+                self.message("Не удалось привязать диалог захвата к окну Wayland")
             return
         self._start_live_now()
 
@@ -378,6 +393,9 @@ class DesktopController:
         self.stop_live()
         self.closing = True
         self.selection_cancel.cancel()
+        if self._portal_parent_surface is not None:
+            self._portal_parent_surface.unexport_handle()
+            self._portal_parent_surface = None
         self.models.shutdown()
         for tr in self.test_translators:
             tr.shutdown()
@@ -406,7 +424,7 @@ def run(action, conf: Config, *, initial="", geometry="", path=None):
         return 0
     app.connect("startup", startup)
     app.connect("command-line", command_line)
-    app.connect("activate", lambda _: holder[0].activate())
+    app.connect("activate", lambda _: holder[0].dispatch("show-window"))
     app.connect("shutdown", lambda _: holder and holder[0].quit())
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15, lambda: (holder[0].quit(), False)[1] if holder else False)
     return app.run(["kizurium-translator", json.dumps({"action": action, "initial": initial, "geometry": geometry})])
