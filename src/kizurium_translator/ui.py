@@ -12,6 +12,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 from . import translate as translate_mod
+from . import window_state
 
 WIN_W, WIN_H = 880, 460
 APP_ID_TEXTUI = "ru.kizurium.translator.textui"
@@ -42,6 +43,7 @@ LANGS = [
 ]
 
 _GUI_ERROR = ""
+_TEXT_CSS_DISPLAYS: set = set()
 
 
 def _gtk():
@@ -157,46 +159,27 @@ def text_window(
         win.add_css_class("kizurium-text")
         win.set_default_size(WIN_W, WIN_H)
         win.set_resizable(True)
+        window_state.restore(win, "translator")
+        app.connect("shutdown", lambda *_: window_state.remember(win, "translator"))
 
-        css = Gtk.CssProvider()
-        css.load_from_data(
-            b"""
-window.kizurium-text { background-color: #1f1f1f; }
-window.kizurium-text .card { background-color: #2b2b2b; border-radius: 12px; }
-window.kizurium-text .big textview, window.kizurium-text .big textview text {
-              background-color: transparent;
-              color: #e8eaed;
-              font-size: 22px;
-            }
-window.kizurium-text .roman { color: #9aa0a6; font-size: 13px; }
-window.kizurium-text .hint { color: #9aa0a6; font-size: 12px; }
-window.kizurium-text .swap {
-              background-color: transparent;
-              color: #e8eaed;
-              border: none;
-              font-size: 18px;
-              min-width: 40px;
-              min-height: 36px;
-              border-radius: 18px;
-            }
-window.kizurium-text .swap:hover { background-color: rgba(255,255,255,0.08); }
-window.kizurium-text .iconbtn {
-              background-color: transparent;
-              color: #9aa0a6;
-              border: none;
-              border-radius: 18px;
-              min-width: 36px;
-              min-height: 36px;
-            }
-window.kizurium-text .iconbtn:hover { background-color: rgba(255,255,255,0.08); color: #e8eaed; }
-window.kizurium-text dropdown { min-height: 36px; min-width: 150px; }
-window.kizurium-text .status { color: #9aa0a6; font-size: 12px; }
-window.kizurium-text .status-err { color: #f28b82; }
-            """
-        )
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-        )
+        display = win.get_display()
+        if display not in _TEXT_CSS_DISPLAYS:
+            css = Gtk.CssProvider()
+            css.load_from_data(
+                b"""
+    window.kizurium-text .card { border: 1px solid alpha(currentColor, 0.18); border-radius: 12px; }
+    window.kizurium-text textview, window.kizurium-text textview text {
+        background-color: transparent; font-size: 20px;
+    }
+    window.kizurium-text .hint, window.kizurium-text .status { opacity: 0.7; font-size: 12px; }
+    window.kizurium-text dropdown { min-height: 32px; }
+    window.kizurium-text .status-err { color: @error_color; }
+                """
+            )
+            Gtk.StyleContext.add_provider_for_display(
+                display, css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+            _TEXT_CSS_DISPLAYS.add(display)
 
         state = {
             "source": tr.source or "auto",
@@ -209,36 +192,34 @@ window.kizurium-text .status-err { color: #f28b82; }
         for m in ("top", "bottom", "start", "end"):
             getattr(root, f"set_margin_{m}")(14)
 
+        header = Gtk.HeaderBar()
+        header.set_title_widget(Gtk.Label(label="Переводчик"))
+        win.set_titlebar(header)
+
         lang_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        lang_bar.set_halign(Gtk.Align.CENTER)
+        lang_bar.set_halign(Gtk.Align.FILL)
+        lang_bar.set_homogeneous(False)
 
         src_codes = [c for c, _ in LANGS]
         dst_codes = [c for c, _ in LANGS if c != "auto"]
         src_dd = _lang_dropdown(Gtk, src_codes, state["source"])
         dst_dd = _lang_dropdown(Gtk, dst_codes, state["target"])
-        btn_swap = Gtk.Button(label="⇄")
-        btn_swap.add_css_class("swap")
+        src_dd.set_hexpand(True)
+        dst_dd.set_hexpand(True)
+        btn_swap = Gtk.Button.new_from_icon_name("object-flip-horizontal-symbolic")
+        btn_swap.add_css_class("flat")
         btn_swap.set_tooltip_text("Поменять языки местами")
 
         lang_bar.append(src_dd)
         lang_bar.append(btn_swap)
         lang_bar.append(dst_dd)
         if controller:
-            # The only addition to the reference layout: an icon laid over the
-            # language bar, so no row is added and the window keeps its size.
-            # Capture / start / stop / quit live in the tray and Desktop Actions.
             btn_settings = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
-            btn_settings.add_css_class("iconbtn")
-            btn_settings.set_tooltip_text("Settings / Настройки")
-            btn_settings.set_halign(Gtk.Align.END)
-            btn_settings.set_valign(Gtk.Align.CENTER)
+            btn_settings.add_css_class("flat")
+            btn_settings.set_tooltip_text("Настройки")
             btn_settings.connect("clicked", lambda _b: controller.dispatch("settings"))
-            top_overlay = Gtk.Overlay()
-            top_overlay.set_child(lang_bar)
-            top_overlay.add_overlay(btn_settings)
-            root.append(top_overlay)
-        else:
-            root.append(lang_bar)
+            header.pack_end(btn_settings)
+        root.append(lang_bar)
 
         status = Gtk.Label(label="", xalign=0.5)
         status.add_css_class("status")
@@ -246,6 +227,7 @@ window.kizurium-text .status-err { color: #f28b82; }
 
         panes = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         panes.set_vexpand(True)
+        panes.set_homogeneous(True)
 
         left = _pane(Gtk, editable=True, hint="Введите текст")
         # Read-only on purpose. The right pane is the result, and a user who can
@@ -379,7 +361,21 @@ window.kizurium-text .status-err { color: #f28b82; }
         right["clear"].connect("clicked", on_copy)
 
         win.set_child(root)
+        def on_surface_layout(_surface, width, _height):
+            orientation = Gtk.Orientation.VERTICAL if width < 640 else Gtk.Orientation.HORIZONTAL
+            if panes.get_orientation() != orientation:
+                panes.set_orientation(orientation)
+
+        def on_realize(widget):
+            surface = widget.get_surface()
+            if surface is not None:
+                surface.connect("layout", on_surface_layout)
+                on_surface_layout(surface, surface.get_width(), surface.get_height())
+
+        win.connect("realize", on_realize)
+
         def on_close(*_a) -> bool:
+            window_state.remember(win, "translator")
             if controller:
                 win.set_visible(False)
                 return True
@@ -430,14 +426,16 @@ def _pane(Gtk, editable: bool, hint: str) -> dict:  # noqa: ANN001
     top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
     top.set_halign(Gtk.Align.END)
     if editable:
-        clear_btn = Gtk.Button(label="✕")
-        clear_btn.add_css_class("iconbtn")
+        clear_btn = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
+        clear_btn.set_tooltip_text("Очистить текст")
+        clear_btn.add_css_class("flat")
     else:
         # The result is read-only, so what a user wants from it is to take it
         # away. Without this the only way to get the translation out was to
         # select the text by hand in a field that used to be editable.
-        clear_btn = Gtk.Button(label="Копировать")
-        clear_btn.add_css_class("iconbtn")
+        clear_btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
+        clear_btn.set_tooltip_text("Копировать перевод")
+        clear_btn.add_css_class("flat")
     top.append(clear_btn)
     card.append(top)
 
@@ -445,7 +443,7 @@ def _pane(Gtk, editable: bool, hint: str) -> dict:  # noqa: ANN001
     scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
     scrolled.set_vexpand(True)
     scrolled.set_hexpand(True)
-    scrolled.set_min_content_height(220)
+    scrolled.set_min_content_height(110)
 
     view = Gtk.TextView()
     view.set_wrap_mode(Gtk.WrapMode.WORD)
