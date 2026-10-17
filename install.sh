@@ -4,6 +4,8 @@
 set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local}"
+INSTALLER_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+REPO_DIR="$(cd -- "$(dirname -- "$INSTALLER_PATH")" && pwd -P)"
 STATE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kizurium-translator"
 XDG_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/kizurium-translator"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kizurium-translator"
@@ -17,6 +19,43 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 err()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+need_value() {
+    if (($# < 2)) || [[ -z "$2" ]]; then
+        err "$1 требует непустое значение"
+        exit 2
+    fi
+}
+
+validate_extras() {
+    local item
+    for item in ${1:-}; do
+        case "$item" in
+            rapid|meiki|deep-translate|local-mt|all) ;;
+            *) err "неизвестный extra: $item"; return 1 ;;
+        esac
+    done
+}
+
+validate_bergamot_pairs() {
+    local pair
+    for pair in ${1:-}; do
+        [[ "$pair" =~ ^[[:alnum:]]+-[[:alnum:]]+$ ]] || {
+            err "неверная пара Bergamot: $pair (пример: en-ru)"
+            return 1
+        }
+    done
+}
+
+unquote_saved_value() {
+    local value="$1"
+    if [[ "$value" == \"*\" && ${#value} -ge 2 ]]; then
+        value="${value:1:${#value}-2}"
+    elif [[ "$value" == \'*\' && ${#value} -ge 2 ]]; then
+        value="${value:1:${#value}-2}"
+    fi
+    printf '%s' "$value"
+}
 
 # Non-interactive? (CI / piped stdin) — use safe defaults, don't hang.
 is_tty() { [[ -t 0 && -t 1 ]]; }
@@ -244,10 +283,10 @@ checklist_has() {
 }
 
 run_doctor_now() {
-    if have kizurium-translator; then
-        kizurium-translator --doctor || true
-    elif [[ -x "$BIN_DIR/kizurium-translator" ]]; then
+    if [[ -x "$BIN_DIR/kizurium-translator" ]]; then
         "$BIN_DIR/kizurium-translator" --doctor || true
+    elif have kizurium-translator; then
+        kizurium-translator --doctor || true
     else
         warn "команда ещё не установлена — сначала Install"
     fi
@@ -298,16 +337,16 @@ INTERACTIVE_MENU=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --extras)            EXTRAS="$2"; INTERACTIVE_MENU=0; shift 2 ;;
+        --extras)            need_value "$@"; EXTRAS="$2"; INTERACTIVE_MENU=0; shift 2 ;;
         --offline-packs)     OFFLINE_PACKS=yes; INTERACTIVE_MENU=0; shift ;;
         --no-offline-packs)  OFFLINE_PACKS=no; INTERACTIVE_MENU=0; shift ;;
-        --bergamot)          BERGAMOT=yes; BERGAMOT_PAIRS="$2"; INTERACTIVE_MENU=0; shift 2 ;;
+        --bergamot)          need_value "$@"; BERGAMOT=yes; BERGAMOT_PAIRS="$2"; INTERACTIVE_MENU=0; shift 2 ;;
         --no-bergamot)       BERGAMOT=no; BERGAMOT_PAIRS=""; INTERACTIVE_MENU=0; shift ;;
         --paddle)            PADDLE=yes; INTERACTIVE_MENU=0; shift ;;
         --update)            UPDATE=1; INTERACTIVE_MENU=0; shift ;;
         --meiki)             MEIKI=yes; INTERACTIVE_MENU=0; shift ;;
         --no-meiki)          MEIKI=no; INTERACTIVE_MENU=0; shift ;;
-        --prefix)            PREFIX="$2"; shift 2 ;;
+        --prefix)            need_value "$@"; PREFIX="$2"; shift 2 ;;
         --system)            WITH_SYSTEM=yes; INTERACTIVE_MENU=0; shift ;;
         --yes|-y)
             # Defaults only for unset knobs — later/earlier --no-offline-packs
@@ -330,8 +369,33 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if ! validate_extras "$EXTRAS"; then
+    usage
+    exit 2
+fi
+if [[ "$BERGAMOT" == yes ]] && ! validate_bergamot_pairs "$BERGAMOT_PAIRS"; then
+    usage
+    exit 2
+fi
+if ((PURGE && !UNINSTALL)); then
+    err "--purge используется только вместе с --uninstall"
+    exit 2
+fi
+if ((UNINSTALL && CLEAN_CACHE)); then
+    err "--uninstall и --clean-cache нельзя запускать одновременно"
+    exit 2
+fi
+
+# A relative prefix made the generated launcher depend on the caller's cwd.
+# Resolve it once so wrappers, desktop entries and removal all use one path.
+if [[ "$PREFIX" == '~' ]]; then
+    PREFIX="$HOME"
+elif [[ "$PREFIX" == '~/'* ]]; then
+    PREFIX="$HOME/${PREFIX#~/}"
+fi
+PREFIX="$(realpath -m -- "$PREFIX")"
+
 BIN_DIR="$PREFIX/bin"
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SYS_PKGS=(
     grim
@@ -369,11 +433,45 @@ if ((UPDATE)); then
         err "нет сохранённых опций ($STATE_DIR/install-options): сначала обычная установка ./install.sh"
         exit 1
     fi
-    # shellcheck disable=SC1091
-    . "$STATE_DIR/install-options"
+    # This is our data file, not shell code. Never source a writable file from
+    # the user's data directory; accept only known keys and constrained values.
+    saved_system_choice=0
+    while IFS='=' read -r key value || [[ -n "${key:-}${value:-}" ]]; do
+        [[ -z "${key:-}" ]] && continue
+        value="$(unquote_saved_value "${value:-}")"
+        case "$key" in
+            EXTRAS)
+                validate_extras "$value" || exit 1
+                EXTRAS="$value"
+                ;;
+            OFFLINE_PACKS|MEIKI|PADDLE|SYSTEM_PACKAGES)
+                [[ "$value" == yes || "$value" == no ]] || {
+                    err "повреждены сохранённые опции установки: $key"
+                    exit 1
+                }
+                case "$key" in
+                    OFFLINE_PACKS) OFFLINE_PACKS="$value" ;;
+                    MEIKI) MEIKI="$value" ;;
+                    PADDLE) PADDLE="$value" ;;
+                    SYSTEM_PACKAGES) WITH_SYSTEM="$value"; saved_system_choice=1 ;;
+                esac
+                ;;
+            BERGAMOT_PAIRS)
+                validate_bergamot_pairs "$value" || exit 1
+                BERGAMOT_PAIRS="$value"
+                ;;
+            *)
+                err "неизвестная запись в сохранённых опциях установки: $key"
+                exit 1
+                ;;
+        esac
+    done < "$STATE_DIR/install-options"
     ASSUME_YES=1
     INTERACTIVE_MENU=0
     INSTALL_OPTS_SET=1
+    # Older installations did not record whether system packages were chosen.
+    # Make update predictable and non-interactive by checking/installing them.
+    ((saved_system_choice)) || WITH_SYSTEM=yes
     [[ -n "$BERGAMOT_PAIRS" ]] && BERGAMOT=yes
 fi
 
@@ -453,10 +551,10 @@ EOF
 # -------------------------------------------------------------- clean-cache
 do_clean_cache() {
     step "Чистка кэша и логов (приложение остаётся)"
-    if have kizurium-translator; then
-        kizurium-translator --stop 2>/dev/null || true
-    elif [[ -x "$BIN_DIR/kizurium-translator" ]]; then
+    if [[ -x "$BIN_DIR/kizurium-translator" ]]; then
         "$BIN_DIR/kizurium-translator" --stop 2>/dev/null || true
+    elif have kizurium-translator; then
+        kizurium-translator --stop 2>/dev/null || true
     fi
     local wiped=0
     if [[ -d "$CACHE_DIR" ]]; then
@@ -489,10 +587,10 @@ EOF
 do_uninstall() {
     step "Удаление Kizurium Translator"
     # Stop via whatever is on PATH or the known wrapper.
-    if have kizurium-translator; then
-        kizurium-translator --stop 2>/dev/null || true
-    elif [[ -x "$BIN_DIR/kizurium-translator" ]]; then
+    if [[ -x "$BIN_DIR/kizurium-translator" ]]; then
         "$BIN_DIR/kizurium-translator" --stop 2>/dev/null || true
+    elif have kizurium-translator; then
+        kizurium-translator --stop 2>/dev/null || true
     fi
 
     if [[ -e "$BIN_DIR/kizurium-translator" || -L "$BIN_DIR/kizurium-translator" ]]; then
@@ -566,7 +664,7 @@ pacman_install() {
 }
 
 remove_path_rc_lines() {
-    local marker="kizurium-translator"
+    local marker="# kizurium-translator"
     for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.config/fish/config.fish"; do
         [[ -f "$rc" ]] || continue
         if grep -qF "$marker" "$rc" 2>/dev/null; then
@@ -606,18 +704,22 @@ ensure_path() {
     warn "~/.local/bin не в PATH — без этого команда «не найдётся»"
     echo "    Сейчас можно так:  $BIN_DIR/kizurium-translator"
     mkdir -p "$STATE_DIR"
-    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR" >"$STATE_DIR/path-hint.sh"
+    local escaped_bin
+    printf -v escaped_bin '%q' "$BIN_DIR"
+    printf 'export PATH=%s:"$PATH"\n' "$escaped_bin" >"$STATE_DIR/path-hint.sh"
     if ! is_tty || ((ASSUME_YES)); then
         ok "подсказка PATH: $STATE_DIR/path-hint.sh  (source её или добавь в shell rc)"
         return 0
     fi
     if ask_yn "Добавить $BIN_DIR в PATH в конфиг шелла (~/.zshrc / ~/.bashrc)?" N; then
-        local line="export PATH=\"$BIN_DIR:\$PATH\"  # kizurium-translator"
+        local line
+        printf -v escaped_bin '%q' "$BIN_DIR"
+        line="export PATH=$escaped_bin:\$PATH  # kizurium-translator"
         local added=0
         for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
             if [[ -f "$rc" ]] || [[ "$rc" == "$HOME/.zshrc" && -n "${ZSH_VERSION:-}" ]] || [[ "$rc" == "$HOME/.bashrc" && -n "${BASH_VERSION:-}" ]]; then
                 touch "$rc"
-                if ! grep -qF "kizurium-translator" "$rc" 2>/dev/null; then
+                if ! grep -qF "# kizurium-translator" "$rc" 2>/dev/null; then
                     printf '\n%s\n' "$line" >>"$rc"
                     ok "добавлено в $rc"
                     added=1
@@ -631,8 +733,10 @@ ensure_path() {
         if [[ -d "$HOME/.config/fish" ]]; then
             local fishc="$HOME/.config/fish/config.fish"
             touch "$fishc"
-            local fline="fish_add_path $BIN_DIR  # kizurium-translator"
-            if ! grep -qF "kizurium-translator" "$fishc" 2>/dev/null; then
+            local fish_bin="${BIN_DIR//\\/\\\\}"
+            fish_bin="${fish_bin//\'/\\\'}"
+            local fline="fish_add_path '$fish_bin'  # kizurium-translator"
+            if ! grep -qF "# kizurium-translator" "$fishc" 2>/dev/null; then
                 printf '\n%s\n' "$fline" >>"$fishc"
                 ok "добавлено в $fishc"
                 added=1
@@ -873,6 +977,8 @@ if ((INSTALL_OPTS_SET == 0)); then
     [[ "$WITH_SYSTEM" == ask ]] && WITH_SYSTEM=yes
     [[ "$MEIKI" == ask ]] && MEIKI=yes
     [[ "$OFFLINE_PACKS" == ask ]] && OFFLINE_PACKS=no
+    [[ "$BERGAMOT" == ask ]] && BERGAMOT=no
+    [[ "$PADDLE" == ask ]] && PADDLE=no
 fi
 
 step "Установка"
@@ -914,10 +1020,12 @@ step "Python-окружение"
 ensure_uv
 
 PYVER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-case "$PYVER" in
-    3.11|3.12|3.13|3.14) ok "python $PYVER" ;;
-    *) err "python $PYVER не поддерживается; нужны 3.11–3.14"; exit 1 ;;
-esac
+IFS=. read -r py_major py_minor <<< "$PYVER"
+if ((py_major < 3 || (py_major == 3 && py_minor < 11))); then
+    err "Python $PYVER не поддерживается; нужен Python 3.11 или новее"
+    exit 1
+fi
+ok "Python $PYVER (совместимость зависимостей проверит uv sync)"
 
 mkdir -p "$STATE_DIR" "$BIN_DIR"
 
@@ -968,23 +1076,28 @@ else
 fi
 
 cd "$REPO_DIR"
-# shellcheck disable=SC2086
-UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --locked --no-editable ${EXTRAS:+--extra ${EXTRAS// / --extra }} >/dev/null
+uv_extra_args=()
+for extra in $EXTRAS; do
+    uv_extra_args+=(--extra "$extra")
+done
+if ! UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --locked --no-editable "${uv_extra_args[@]}"; then
+    err "не удалось установить Python-зависимости для Python $PYVER"
+    warn "проверь совместимость выбранных extras и повтори установку с нужными флагами"
+    exit 1
+fi
 ok "пакет установлен${EXTRAS:+ (extras: $EXTRAS)}"
 
-# Replace any prior symlink (e.g. old link into a repo .venv). A plain
-# `cat >file` would follow the symlink and overwrite the target instead.
-rm -f "$BIN_DIR/kizurium-translator"
-cat >"$BIN_DIR/kizurium-translator" <<EOF
-#!/usr/bin/env bash
-# Generated by kizurium-translator install.sh
-export VIRTUAL_ENV="$VENV_DIR"
-export PATH="$VENV_DIR/bin:\$PATH"
-# Keep compositor env if a keybind stripped it (Hyprland/Niri/Mango recovery
-# lives inside the Python process too — this just preserves what the shell has).
-exec "$VENV_DIR/bin/kizurium-translator" "\$@"
-EOF
-chmod +x "$BIN_DIR/kizurium-translator"
+launcher="$(mktemp "$BIN_DIR/.kizurium-translator.XXXXXX")"
+{
+    printf '#!/usr/bin/env bash\n'
+    printf '# Generated by kizurium-translator install.sh\n'
+    printf 'export VIRTUAL_ENV=%q\n' "$VENV_DIR"
+    printf 'export PATH=%q:"$PATH"\n' "$VENV_DIR/bin"
+    printf '# Preserve the compositor environment for Wayland capture.\n'
+    printf 'exec %q "$@"\n' "$VENV_DIR/bin/kizurium-translator"
+} > "$launcher"
+chmod 755 "$launcher"
+mv -f -- "$launcher" "$BIN_DIR/kizurium-translator"
 ok "команда: $BIN_DIR/kizurium-translator"
 
 ensure_path
@@ -1069,23 +1182,50 @@ DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 APPS_DIR="$DATA_HOME/applications"
 ICON_DIR="$DATA_HOME/icons/hicolor/256x256/apps"
 mkdir -p "$APPS_DIR" "$ICON_DIR"
-# Absolute path: a launcher started by the desktop does not see the shell's PATH.
-sed -E "s#^(Try)?Exec=kizurium-translator#\1Exec=$BIN_DIR/kizurium-translator#" \
-    "$REPO_DIR/assets/kizurium-translator.desktop" >"$APPS_DIR/kizurium-translator.desktop"
+desktop_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//\`/\\\`}"
+    value="${value//\$/\\\$}"
+    printf '"%s"' "$value"
+}
+
+# Desktop Exec has its own quoting rules; sed replacement text is unsafe for
+# prefixes containing spaces or characters meaningful to sed/desktop files.
+desktop_exec="$(desktop_quote "$BIN_DIR/kizurium-translator")"
+desktop_tmp="$(mktemp "$APPS_DIR/.kizurium-translator.desktop.XXXXXX")"
+while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+        Exec=kizurium-translator*)
+            printf 'Exec=%s%s\n' "$desktop_exec" "${line#Exec=kizurium-translator}"
+            ;;
+        TryExec=kizurium-translator*)
+            printf 'TryExec=%s%s\n' "$desktop_exec" "${line#TryExec=kizurium-translator}"
+            ;;
+        *) printf '%s\n' "$line" ;;
+    esac
+done < "$REPO_DIR/assets/kizurium-translator.desktop" > "$desktop_tmp"
+chmod 644 "$desktop_tmp"
+mv -f -- "$desktop_tmp" "$APPS_DIR/kizurium-translator.desktop"
 install -m 644 "$REPO_DIR/assets/icons/kizurium-translator.png" "$ICON_DIR/kizurium-translator.png"
 have update-desktop-database && update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
 have kbuildsycoca6 && kbuildsycoca6 >/dev/null 2>&1 || true
 have gtk-update-icon-cache && gtk-update-icon-cache -q "$DATA_HOME/icons/hicolor" >/dev/null 2>&1 || true
 ok "ярлык: $APPS_DIR/kizurium-translator.desktop (действия: Открыть окно, Автоперевод, Настройки …)"
 
-# What --update will repeat.
-cat >"$STATE_DIR/install-options" <<EOF
-EXTRAS="$EXTRAS"
+# Store plain, validated data for --update; the loader above never evaluates it.
+options_tmp="$(mktemp "$STATE_DIR/.install-options.XXXXXX")"
+cat >"$options_tmp" <<EOF
+EXTRAS=$EXTRAS
+SYSTEM_PACKAGES=$WITH_SYSTEM
 OFFLINE_PACKS=$OFFLINE_PACKS
 MEIKI=$MEIKI
-BERGAMOT_PAIRS="$BERGAMOT_PAIRS"
+BERGAMOT_PAIRS=$BERGAMOT_PAIRS
 PADDLE=$PADDLE
 EOF
+chmod 600 "$options_tmp"
+mv -f -- "$options_tmp" "$STATE_DIR/install-options"
 
 step "Состояние моделей"
 "$BIN_DIR/kizurium-translator" --model-status || true
