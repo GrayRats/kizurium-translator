@@ -11,7 +11,7 @@ project_dir="$(cd -- "$(dirname -- "$script_path")" && pwd -P)"
 cd -- "$project_dir"
 
 resolve_python() {
-    local candidate="$1" version major minor
+    local candidate="$1" require_gtk="${2:-no}" version major minor
     if [[ "$candidate" != */* ]]; then
         candidate="$(command -v -- "$candidate" 2>/dev/null || true)"
     fi
@@ -19,6 +19,9 @@ resolve_python() {
     version="$("$candidate" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)" || return 1
     IFS=. read -r major minor <<< "$version"
     ((major > 3 || (major == 3 && minor >= 11))) || return 1
+    if [[ "$require_gtk" == yes ]]; then
+        "$candidate" -c 'import gi, cairo; gi.require_version("Gtk", "4.0"); gi.require_version("Gtk4LayerShell", "1.0")' >/dev/null 2>&1 || return 1
+    fi
     python_bin="$candidate"
     python_version="$version"
     return 0
@@ -36,18 +39,19 @@ else
     candidates=(
         "$project_dir/.venv/bin/python"
         "$state_data"
+        /usr/bin/python3
         python3
         python
     )
     for candidate in "${candidates[@]}"; do
-        if resolve_python "$candidate"; then
+        if resolve_python "$candidate" yes; then
             break
         fi
     done
 fi
 
 if [[ -z "$python_bin" ]]; then
-    printf 'Подходящий Python не найден. Нужен Python 3.11+ и зависимости Kizurium.\n' >&2
+    printf 'Нужен Python 3.11+ с GTK4, PyGObject, Cairo и gtk4-layer-shell. Запустите ./install.sh --update.\n' >&2
     printf 'Задайте его явно: KIZURIUM_PYTHON=/path/to/python ./run.sh\n' >&2
     exit 127
 fi
