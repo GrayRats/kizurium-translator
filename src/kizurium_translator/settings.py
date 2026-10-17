@@ -24,6 +24,8 @@ class SettingsWindow:
         self.Gtk, self.controller = Gtk, controller
         self.fields = {}
         self.provider_fields = {}
+        self.provider_drafts = {}
+        self._shown_provider = None
         cfg = controller.conf
         self.win = Gtk.ApplicationWindow(application=controller.app, title="Kizurium — Настройки")
         self.win.set_default_size(560, 520)
@@ -60,7 +62,7 @@ class SettingsWindow:
         general.append(self.offline)
         self.auto = Gtk.CheckButton(label="Автоматический OCR и перевод")
         self.auto.set_active(controller.live is not None)
-        self.auto.connect("toggled", lambda b: controller.dispatch("start-auto-translate" if b.get_active() else "stop-auto-translate"))
+        self._auto_handler = self.auto.connect("toggled", lambda b: controller.dispatch("start-auto-translate" if b.get_active() else "stop-auto-translate"))
         general.append(self.auto)
         general.append(Gtk.Label(label="Закрытие окна скрывает приложение в системный трей. Выход завершает все операции.", wrap=True, xalign=0))
 
@@ -140,6 +142,13 @@ class SettingsWindow:
         advanced.append(self.diagnostic_text)
         self.win.connect("close-request", self.close)
 
+    def set_auto_active(self, active):
+        self.auto.handler_block(self._auto_handler)
+        try:
+            self.auto.set_active(active)
+        finally:
+            self.auto.handler_unblock(self._auto_handler)
+
     def close(self, *_):
         self.win.set_visible(False)
         return True
@@ -151,7 +160,7 @@ class SettingsWindow:
         return button
 
     def entry(self, box, key, label, value, tooltip="", password=False, fields=None):
-        box.append(self.Gtk.Label(label=label, xalign=0))
+        box.append(self.Gtk.Label(label=label, xalign=0, wrap=True))
         widget = self.Gtk.Entry()
         widget.set_text(str(value))
         widget.set_visibility(not password)
@@ -162,14 +171,19 @@ class SettingsWindow:
         return widget
 
     def dropdown(self, box, label, values, selected):
-        box.append(self.Gtk.Label(label=label, xalign=0))
+        box.append(self.Gtk.Label(label=label, xalign=0, wrap=True))
         dropdown = self.Gtk.DropDown.new_from_strings(values)
         dropdown.set_selected(selected)
         box.append(dropdown)
         return dropdown
 
     def provider_changed(self, *_):
+        if self._shown_provider is not None:
+            self.provider_drafts[self._shown_provider] = {
+                key: field.get_text() for key, field in self.provider_fields.items()
+            }
         pid = self.provider_codes[self.provider.get_selected()]
+        self._shown_provider = pid
         self.description.set_label(DESCRIPTIONS[pid])
         child = self.provider_box.get_first_child()
         while child:
@@ -177,7 +191,7 @@ class SettingsWindow:
             self.provider_box.remove(child)
             child = nxt
         self.provider_fields = {}
-        options = self.controller.conf.provider_options.get(pid, {})
+        options = self.provider_drafts.get(pid, self.controller.conf.provider_options.get(pid, {}))
         schema = {
             "google": [("timeout", "HTTP timeout, с", "15")],
             "yandex": [("auth", "Авторизация: api-key / iam", "api-key"), ("folder_id", "Folder ID", "")],
@@ -191,7 +205,7 @@ class SettingsWindow:
                 value = json.dumps(value, ensure_ascii=False)
             self.entry(self.provider_box, key, label, value, fields=self.provider_fields, password=key == "headers")
         if pid not in {"google", "bergamot"}:
-            self.entry(self.provider_box, "key", "Новый API key / token (пусто — оставить сохранённый)", "", "Хранится в KWallet / Secret Service. Альтернатива: KIZURIUM_<PROVIDER>_API_KEY", password=True, fields=self.provider_fields)
+            self.entry(self.provider_box, "key", "Новый API key / token (пусто — оставить сохранённый)", options.get("key", ""), "Хранится в KWallet / Secret Service. Альтернатива: KIZURIUM_<PROVIDER>_API_KEY", password=True, fields=self.provider_fields)
 
     def config(self):
         cfg = self.controller.conf

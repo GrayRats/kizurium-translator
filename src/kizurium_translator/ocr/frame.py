@@ -167,6 +167,14 @@ def ocr_image(region_img: Image.Image, hint: str | None = None) -> tuple[list[di
     if selected == ("tesseract",):
         from .universal import _run_tesseract
         return annotate_lines(_run_tesseract(region_img), engine="tesseract"), "mixed"
+    from . import engine
+    from .routing import available_engines
+
+    available = available_engines()
+    if not available:
+        raise RuntimeError("Выбранные движки OCR недоступны: " + ", ".join(selected))
+    if selected == ("rapid",) and engine.RAPID_INIT_FAILED:
+        raise RuntimeError("RapidOCR не удалось инициализировать; проверьте зависимости и модели OCR")
     from ..live.reconcile import rapid_ocr_lines
     t0 = time.monotonic()
     w, h = region_img.size
@@ -527,7 +535,7 @@ def ocr_image(region_img: Image.Image, hint: str | None = None) -> tuple[list[di
                     tdetail(f"letterbox-deep preview={deep_blocks[0]['text'][:70]!r}")
                     return merge_spoken_with_hud(region_img, deep_blocks[:3], band_only, [])
         # видео-субтитры: пустая полоса / fade — НЕ гоняем Meiki на полный кадр
-        if hint == "eng-subtitle" and not band_only and cjk_n < 2:
+        if hint == "eng-subtitle" and not band_only and cjk_n < 2 and not engine.RAPID_INIT_FAILED:
             tlog(f"band-empty hold hint={hint} ocr_ms={int((time.monotonic()-t0)*1000)}")
             return [], hint
 
@@ -543,6 +551,13 @@ def ocr_image(region_img: Image.Image, hint: str | None = None) -> tuple[list[di
         )
         tlog(f"ocr-upscale {w}x{h} -> {ocr_src.width}x{ocr_src.height}")
     rapid = rapid_ocr_lines(ocr_src, max_side=0 if ocr_scale > 1 else 1280)
+    if not rapid and not band_lines and "tesseract" in available and (
+        engine.RAPID_INIT_FAILED or "rapid" not in available
+    ):
+        from .universal import _recognize_on
+
+        return annotate_lines(_recognize_on(region_img), engine="tesseract"), "mixed"
+
     if ocr_scale > 1:
         scaled = []
         for p in rapid:
@@ -712,4 +727,3 @@ def ocr_image(region_img: Image.Image, hint: str | None = None) -> tuple[list[di
     # `read_frame`, где видно любой пустой исход.
     tlog(f"ocr-empty (no tess kitchen-sink) en={en_q:.1f} jp={jp_q:.1f}")
     return [], hint or "eng-ui"
-

@@ -349,6 +349,32 @@ def _even_list_sizes(blocks: list[dict]) -> None:
             b["font"] = size
 
 
+def _split_words_by_weight(words: list[str], weights: list[int]) -> list[str]:
+    """Distribute words over len(weights) groups in order, proportionally; each gets >= 1."""
+    n, total = len(weights), float(sum(weights))
+    counts = [max(1, int(len(words) * w / total)) for w in weights]
+    # hand out the remainder to the groups with the largest fractional share
+    rest = len(words) - sum(counts)
+    order = sorted(range(n), key=lambda i: len(words) * weights[i] / total - counts[i], reverse=True)
+    for i in order:
+        if rest <= 0:
+            break
+        counts[i] += 1
+        rest -= 1
+    # a group can only lose words down to one while another is over budget
+    while rest < 0:
+        i = max(range(n), key=lambda j: counts[j])
+        if counts[i] <= 1:
+            break
+        counts[i] -= 1
+        rest += 1
+    out, pos = [], 0
+    for c in counts:
+        out.append(" ".join(words[pos:pos + c]))
+        pos += c
+    return out
+
+
 def expand_subtitle_line_blocks(
     par: dict,
     translated: str,
@@ -397,22 +423,16 @@ def expand_subtitle_line_blocks(
         tr_lines.append("")
     if len(tr_lines) > len(line_boxes):
         tr_lines = tr_lines[: len(line_boxes) - 1] + [" ".join(tr_lines[len(line_boxes) - 1:])]
-    # пустой слот при 2+ OCR-строках — перетянуть слово с соседа, НЕ схлопывать в одну
-    for i in range(len(tr_lines)):
-        if tr_lines[i]:
-            continue
-        donor = i - 1 if i > 0 and tr_lines[i - 1] else (i + 1 if i + 1 < len(tr_lines) else -1)
-        if donor < 0:
-            continue
-        dw = tr_lines[donor].split()
-        if len(dw) >= 2:
-            if donor < i:
-                tr_lines[i] = dw[-1]
-                tr_lines[donor] = " ".join(dw[:-1])
-            else:
-                tr_lines[i] = dw[0]
-                tr_lines[donor] = " ".join(dw[1:])
-            tlog(f"sub-card-fill-empty[{i}] from[{donor}]")
+    # Пустой слот при 2+ блоках: перевод пришёл без разрыва строк. Раньше слот
+    # заполнялся одним словом соседа - у абзаца из двух кусков по 3-4 строки второй
+    # кусок получал «алиби» одним словом и растягивал его на 90 px. Теперь весь
+    # перевод делится по словам пропорционально длине исходного текста каждого блока.
+    if any(not t for t in tr_lines):
+        words = " ".join(tr_lines).split()
+        if len(words) >= len(line_boxes):
+            weights = [max(1, len(str(lb.get("text", "")))) for lb in line_boxes]
+            tr_lines = _split_words_by_weight(words, weights)
+            tlog(f"sub-card-split weights={weights} words={[len(t.split()) for t in tr_lines]}")
     out: list[dict] = []
     for i, (lb, tr) in enumerate(zip(line_boxes, tr_lines)):
         if not tr:

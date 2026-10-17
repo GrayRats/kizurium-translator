@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import re
 import time
+from concurrent.futures import TimeoutError
 
 from .. import translate as translate_mod
-from ..core.text import RE_LAT, block_lang, tlog
+from ..core.text import block_lang, tlog
 from ..ocr.engine import normalize_japanese_text
 from ..translation.service import (
     glossary_translation,
@@ -20,27 +21,32 @@ from ..translation.service import (
 from ..typography.metrics import RE_JPN
 
 
-def _translate_tail(text: str) -> str:
+def _translate_tail(text: str, *, tr=None, source: str | None = None) -> str:
     """Translate the remainder of a phrase whose head came from the glossary."""
     from ..live.runtime import translator
+    tr = tr if tr is not None else translator()
     if not text:
         return ""
-    if glossary_translation(text):
-        return glossary_translation(text) or ""
+    manual = glossary_translation(text, target_lang=tr.target)
+    if manual:
+        return manual
     try:
-        source = "ja" if RE_JPN.search(text) else "en"
-        got = translator().translate(text, source=source, allow_slow=True)
+        source = source or tr.resolve_source(text)
+        got = tr.translate(text, source=source, allow_slow=True)
     except Exception:  # noqa: BLE001
         return ""
     return got.strip() if got and not is_translation_error(text, got) else ""
 
 
-def _translate_line_job(key: str, is_jpn: bool, allow_slow: bool) -> str:
+def _translate_line_job(key: str, source: str, allow_slow: bool, tr, cancelled=lambda: False) -> str:
     """Pool entry: positional args only (``allow_slow`` is keyword-only upstream)."""
-    return translate_single_line(key, is_jpn, allow_slow=allow_slow)
+    if cancelled():
+        return ""
+    return translate_single_line(key, source == "ja", allow_slow=allow_slow, source=source, tr=tr)
 
 
-def translate_single_line(original: str, is_jpn: bool = False, *, allow_slow: bool = False) -> str:
+def translate_single_line(original: str, is_jpn: bool = False, *, allow_slow: bool = False,
+                          source: str | None = None, tr=None) -> str:
     # is_jpn is kept for callers outside the live loop; the text decides anyway
     # (see below), so a caller that passes it wrong loses nothing.
     """One string through the shared backend. Falls back to the source text."""
@@ -53,7 +59,8 @@ def translate_single_line(original: str, is_jpn: bool = False, *, allow_slow: bo
     if TRANSLATION.disabled:
         return cleaned
 
-    manual = glossary_translation(cleaned)
+    tr = tr if tr is not None else translator()
+    manual = glossary_translation(cleaned, target_lang=tr.target)
     if manual:
         return manual
 
@@ -62,13 +69,13 @@ def translate_single_line(original: str, is_jpn: bool = False, *, allow_slow: bo
     # 3" because free translation picked "singer" for "chapter". Only attempted
     # when the head is a term the glossary knows, and only accepted whole.
     if m:= re.fullmatch(r"([A-Za-z][A-Za-z ]{0,24}?)\s+(\d.*)", cleaned):
-        head = glossary_translation(m.group(1).strip())
-        tail = _translate_tail(m.group(2).strip()) if head else ""
+        head = glossary_translation(m.group(1).strip(), target_lang=tr.target)
+        tail = _translate_tail(m.group(2).strip(), tr=tr, source=source) if head else ""
         if head and tail:
             return f"{head} {tail}"
 
-    source = "ja" if (is_jpn or RE_JPN.search(cleaned)) else ("en" if RE_LAT.search(cleaned) else "auto")
-    got = translator().translate(cleaned, source=source, allow_slow=allow_slow)
+    source = source or ("ja" if is_jpn and tr.source == "auto" else tr.resolve_source(cleaned))
+    got = tr.translate(cleaned, source=source, allow_slow=allow_slow)
     if got and not is_translation_error(cleaned, got) and not same_line(cleaned, got):
         return got
     return cleaned
@@ -119,6 +126,17 @@ def translate_many(
         return [cache.get(t, t) for t in texts]
 
     tr = translator()
+    from .scheduler import SCHEDULER
+
+    frame_rev = SCHEDULER.capture()
+    generation = getattr(tr, "_generation", 0)
+
+    def cancelled():
+        return (SCHEDULER.stale(frame_rev)
+                or getattr(tr, "_generation", 0) != generation)
+
+    if getattr(tr, "source", "auto") != "auto":
+        sources = [tr.source] * len(texts)
     missing: list[tuple[int, str, str]] = []
     glossary_n = 0
     disk_n = 0
@@ -129,7 +147,7 @@ def translate_many(
         if key in cache:
             cache[text] = cache[key]
             continue
-        manual = glossary_translation(key)
+        manual = glossary_translation(key, target_lang=tr.target)
         if manual:
             cache[text] = manual
             tr.cache_store(key, manual, src)
@@ -173,7 +191,6 @@ def translate_many(
         still: list[tuple[str, str]] = []
         from .scheduler import SCHEDULER, pack_local_batch
 
-        frame_rev = SCHEDULER.capture()
         # offline_only never opens gtx batch — fall through to per-line
         # (glossary/cache/local MT only).
         if not getattr(tr, "offline_only", False) and getattr(tr, "provider_id", "google") == "google":
@@ -182,6 +199,8 @@ def translate_many(
                 for key, src in chunk:
                     groups.setdefault(src, []).append(key)
                 for src, keys in groups.items():
+                    if cancelled():
+                        return texts
                     if len(keys) < 2:
                         still.extend((k, src) for k in keys)
                         continue
@@ -206,22 +225,35 @@ def translate_many(
             tlog("offline_only: skip gtx-batch")
 
         if still:
-            # When gtx is cooling after 429, single-line must use MyMemory —
-            # otherwise the batch path leaves every miss untranslated.
+            # Keep the language and provider captured for this batch while queued.
             use_slow = False
             futures = {
                 (key, src): TRANSLATION.pool.submit(
-                    _translate_line_job, key, src == "ja", use_slow
+                    _translate_line_job, key, src, use_slow, tr, cancelled
                 )
                 for key, src in still
             }
-            for (key, src), fut in futures.items():
-                try:
-                    res = fut.result(timeout=8.0 if use_slow else 4.0)
-                except Exception:  # noqa: BLE001
-                    res = ""
-                if res and not same_line(key, res) and not SCHEDULER.stale(frame_rev):
-                    tr.cache_store(key, res, src)
+            try:
+                for (key, src), fut in futures.items():
+                    # Poll cancellation while rate limiting/backoff is waiting.
+                    # Queued jobs carry this batch's identity, never a new one
+                    # captured after Stop or a provider change.
+                    while not cancelled():
+                        try:
+                            res = fut.result(timeout=0.1)
+                            break
+                        except TimeoutError:
+                            continue
+                        except Exception:  # noqa: BLE001
+                            res = ""
+                            break
+                    else:
+                        return texts
+                    if res and not same_line(key, res) and not cancelled():
+                        tr.cache_store(key, res, src)
+            finally:
+                for fut in futures.values():
+                    fut.cancel()
 
         for key, src in deferred:
             tr.cache_get(text=key)  # keep the key warm for the next cycle
@@ -253,4 +285,3 @@ def translate_many(
         got = cache.get(text, text)
         out.append(translate_mod.carry_edge_punctuation(text, got))
     return out
-

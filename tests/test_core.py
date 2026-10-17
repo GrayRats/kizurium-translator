@@ -131,17 +131,40 @@ class TestCaptureInMemory:
         assert "NoAuthorized" in caplog.text, "the refusal is reported, not swallowed"
         assert "refused" in capture.capture_backend()
 
-    def test_kwin_errors_other_than_authorization_are_not_hidden_by_the_portal(self, monkeypatch):
+    def test_a_one_off_kwin_error_uses_the_portal_for_that_frame_only(self, monkeypatch, caplog):
         monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
         monkeypatch.setattr(capture, "_kwin_state", None)
+        monkeypatch.setattr(capture, "_kwin_last_transient", "")
+        calls = []
 
-        def broken(geom):
-            raise capture.CaptureError("KWin screenshot timed out")
+        def flaky(geom):
+            calls.append(geom)
+            if len(calls) == 1:
+                raise capture.CaptureError("KWin screenshot timed out")
+            return ("kwin", geom)
 
-        monkeypatch.setattr(capture, "kwin_capture", broken)
-        monkeypatch.setattr(capture, "portal_capture", lambda geom: pytest.fail("no silent fallback"))
-        with pytest.raises(capture.CaptureError, match="timed out"):
-            capture.capture_image("1,2 3x4")
+        monkeypatch.setattr(capture, "kwin_capture", flaky)
+        monkeypatch.setattr(capture, "portal_capture", lambda geom: ("portal", geom))
+        with caplog.at_level("WARNING"):
+            assert capture.capture_image("1,2 3x4") == ("portal", "1,2 3x4")
+            assert capture.capture_image("5,6 7x8") == ("kwin", "5,6 7x8"), "KWin is tried again"
+        assert "timed out" in caplog.text, "the failure is reported, not swallowed"
+        assert capture.capture_backend() == "kwin-screenshot2"
+
+    def test_an_unreadable_kwin_layout_is_remembered_like_a_refusal(self, monkeypatch):
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE")
+        monkeypatch.setattr(capture, "_kwin_state", None)
+        tried = []
+
+        def unreadable(geom):
+            tried.append(geom)
+            raise capture.KWinUnsupported("Unsupported KWin screenshot format: 99")
+
+        monkeypatch.setattr(capture, "kwin_capture", unreadable)
+        monkeypatch.setattr(capture, "portal_capture", lambda geom: ("portal", geom))
+        capture.capture_image("1,2 3x4")
+        capture.capture_image("5,6 7x8")
+        assert len(tried) == 1
 
     def test_capture_error_mentions_tool(self, monkeypatch):
         monkeypatch.setenv("XDG_CURRENT_DESKTOP", "sway")

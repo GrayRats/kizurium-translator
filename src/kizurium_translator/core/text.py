@@ -690,6 +690,58 @@ def sample_ocr_cover_colors(
         for c in px:
             buckets.setdefault((c[0] >> 3, c[1] >> 3, c[2] >> 3), []).append(c)
         ranked = sorted(buckets.values(), key=len, reverse=True)
+        fragmented = len(ranked[0]) < len(px) * 0.20
+        forced_ink = None
+        if fragmented:
+            # A textured panel (paper, grain, JPEG noise) spreads one colour over many
+            # fine buckets while a flat dark patch lands in a single one, so the flat
+            # patch "wins" and a cream banner came out as a black card. Split the box
+            # into a dark and a light class by brightness (Otsu) and take the one that
+            # covers more of it: the panel is the larger area, whatever its texture.
+            lums = [int(0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) for c in px]
+            hist = [0] * 256
+            for v in lums:
+                hist[v] += 1
+            total, sum_all = len(lums), sum(i * n for i, n in enumerate(hist))
+            w0 = s0 = 0
+            best_var, thr = -1.0, 127
+            for t in range(255):
+                w0 += hist[t]
+                s0 += t * hist[t]
+                if w0 == 0 or w0 == total:
+                    continue
+                m0, m1 = s0 / w0, (sum_all - s0) / (total - w0)
+                var = w0 * (total - w0) * (m0 - m1) ** 2
+                if var > best_var:
+                    best_var, thr = var, t
+            dark = [c for c, v in zip(px, lums) if v <= thr]
+            light = [c for c, v in zip(px, lums) if v > thr]
+            panel, other = (light, dark) if len(light) >= len(dark) else (dark, light)
+            # Deliberately narrow. The failure being fixed is a flat dark patch beating a
+            # textured LIGHT panel, so the new reading is used only when the light class is
+            # a clear majority (60%) and the old reading was dark. Everywhere else the old
+            # reading stands: bold letters can out-cover a dark strip, and there the
+            # brightness split names the letters as the panel (measured on the test frames).
+            legacy_lum = sum(_bucket_median(ranked[0])[:3]) / 3.0
+            if panel is not light or len(light) < total * 0.60 or legacy_lum >= 90:
+                panel = other = None
+            if panel and other:
+                pm = _bucket_median(panel)
+                # The ink is the part of the opposite class that is furthest from the
+                # panel; the outer half of it is edge blended into the panel.
+                other.sort(key=lambda c: (c[0] - pm[0]) ** 2 + (c[1] - pm[1]) ** 2 + (c[2] - pm[2]) ** 2,
+                           reverse=True)
+                ink = other[: max(12, len(other) // 2)]
+                im = _bucket_median(ink)
+                pair = _contrast_ratio(tuple(v / 255.0 for v in pm) + (1.0,), tuple(v / 255.0 for v in im) + (1.0,))
+                if pair >= 2.5:
+                    # A pair that reads: take it, and do not second-guess it below.
+                    forced_ink = ink
+                    ranked = [panel] + [r for r in ranked if r is not panel]
+                else:
+                    fragmented = False  # no readable pair by brightness: keep the old reading
+            else:
+                fragmented = False
         bg_bucket = ranked[0]
         # Bold type in a tight box covers more of it than the panel does, and
         # a slanted line's strip is mostly letters. Area then names the ink
@@ -709,7 +761,7 @@ def sample_ocr_cover_colors(
                     bg_bucket = edge_bucket
             top = ranked[0]
             top_key = (top[0][0] >> 3, top[0][1] >> 3, top[0][2] >> 3)
-            if edge_counts.get(top_key, 0) < len(edge) * 0.08:
+            if not fragmented and edge_counts.get(top_key, 0) < len(edge) * 0.08:
                 # Behind the line is artwork, so no one colour holds the border,
                 # and the biggest colour by area is a colour the border hardly
                 # touches: the letters. The panel is then the border itself,
@@ -751,10 +803,13 @@ def sample_ocr_cover_colors(
         # label in bright green on dark green measures under two to one, the game
         # ships it, and it reads - so a threshold set at a legibility standard
         # would throw the pair away and paint the card from the defaults instead.
-        ink_px = None
+        ink_px = forced_ink
         best = 0.0
+        if forced_ink is not None:
+            fm = _bucket_median(forced_ink)
+            best = _contrast_ratio(tuple(v / 255.0 for v in fm) + (1.0,), (br, bg_g, bb, 1.0))
         need = max(12, int(len(px) * 0.04))
-        for bucket in ranked[1:6]:
+        for bucket in ([] if forced_ink is not None else ranked[1:6]):
             if len(bucket) < need:
                 # A colour this thin is the edge of another one, not a colour of
                 # its own, and picking it puts a fringe colour on the whole word.
@@ -770,7 +825,7 @@ def sample_ocr_cover_colors(
             if ratio >= 1.25 and ratio > best:
                 ink_px = bucket
                 best = ratio
-        if ink_px is None or best < 3.0:
+        if forced_ink is None and (ink_px is None or best < 3.0):
             # Thin antialiased type is spread over many shades, and no single
             # bucket of it reaches the bar. Together they are still the ink.
             # Over artwork the same happens to bold type: the panel's shades

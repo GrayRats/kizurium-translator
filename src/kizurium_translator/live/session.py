@@ -402,6 +402,7 @@ def worker(state: State, geom: str, rx: int, ry: int, rw: int, rh: int, stop: th
     ocr_frame_version = 0
 
     active_translator = translator()
+    last_ocr_error = ""
     while not stop.is_set() and os.path.exists(_lock_paths()[0]):
         if active_translator is not translator():
             active_translator = translator()
@@ -662,11 +663,18 @@ def worker(state: State, geom: str, rx: int, ry: int, rw: int, rh: int, stop: th
             # the full pass. `read_frame` returns the lines it kept,
             # so this is also where the session's line count comes from.
             stats.ocr.note_full((time.monotonic() - ocr_t0) * 1000.0, lines=len(lines or []))
-        except Exception:
-            if hold_hidden:
-                state.show()
-            time.sleep(loop_sleep)
+        except Exception as exc:
+            message = f"OCR недоступен: {type(exc).__name__}: {exc}"
+            if message != last_ocr_error:
+                tlog(message)
+            last_ocr_error = message
+            state.set_status(message)
+            state.show()
+            stop.wait(max(1.0, loop_sleep))
             continue
+        if last_ocr_error:
+            state.set_status("")
+            last_ocr_error = ""
 
         # discard when a newer frame arrived or the overlay state
         # was wiped while OCR ran.
@@ -990,7 +998,11 @@ def worker(state: State, geom: str, rx: int, ry: int, rw: int, rh: int, stop: th
                     for i, part in enumerate(flat_parts)
                 ]
                 tr_t0 = time.monotonic()
+                if stop.is_set():
+                    break
                 flat_tr = translate_many(tr_items, cache)
+                if stop.is_set():
+                    break
                 # the backend call itself. The queueing time - how long
                 # a line waited before the worker got to it - is measured at the
                 # point the line was queued, not here, because by the time it

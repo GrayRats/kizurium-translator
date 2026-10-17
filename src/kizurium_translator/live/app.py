@@ -150,6 +150,7 @@ def main(argv: list[str] | None = None, *, application=None):
         win = Gtk.ApplicationWindow(application=app)
         windows.append(win)
         win.set_title("KizuriumTranslatorOverlay")
+        win.add_css_class("kizurium-overlay")
         win.set_decorated(False)
 
         LayerShell.init_for_window(win)
@@ -216,9 +217,7 @@ def main(argv: list[str] | None = None, *, application=None):
         css = Gtk.CssProvider()
         css.load_from_data(
             b"""
-            window,
-            window.background,
-.background {
+            window.kizurium-overlay {
               background: transparent;
               background-color: transparent;
             }

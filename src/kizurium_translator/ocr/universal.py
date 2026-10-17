@@ -337,7 +337,8 @@ def _run_tesseract(region_img: Image.Image, langs: str | None = None) -> list[di
     from ..core.active import current
     from .preprocess import prepare_for_ocr, scale_boxes_down
 
-    lang = langs or tesseract_lang_string()
+    # A compact fallback language list must never override an explicit choice.
+    lang = tesseract_lang_string() if current().ocr_language != "auto" else (langs or tesseract_lang_string())
     options = current().ocr_options
     mode = str(options.get("tesseract_psm", "auto"))
     if mode not in {"auto", "6", "7", "11", "12", "13"}:
