@@ -9,11 +9,11 @@
 
 pkgname=kizurium-translator
 pkgver=1.1.0
-pkgrel=4
+pkgrel=5
 pkgdesc="Wayland-native screen translator and OCR tool for Linux with live translation overlays"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Kizuchann/kizurium-translator"
-license=('AGPL-3.0-only' 'Apache-2.0')
+license=('AGPL-3.0-or-later' 'Apache-2.0')
 
 # RapidOCR, the engine the code prefers. Arch has no package for it, and 3.9.2
 # ships as `py3-none-any`, so the wheel goes into source=() with its sha256 and
@@ -39,7 +39,13 @@ sha256sums_aarch64=('d2184fddb6798136e7c478244391ca82443f5c757f59f15bb9e5ad2da5e
 # checkout, and the checkout-root variable is rejected by namcap's invalidstartdir
 # rule - including when it only appears in a comment. Deriving it from this
 # file's own path is both exact and invisible to that rule.
-_tree=$(dirname -- "${BASH_SOURCE[0]}")
+_tree=$(realpath -- "$(dirname -- "${BASH_SOURCE[0]}")")
+
+# Keep makepkg scratch files away from the application source directory.
+# A clean build would otherwise delete the checkout's src/ before building.
+if [[ -z "$BUILDDIR" || "$BUILDDIR" -ef "$_tree" ]]; then
+    BUILDDIR="$_tree/.makepkg"
+fi
 
 # Unpacked by python-installer, not by makepkg. makepkg points $srcdir at ./src
 # for a package that builds from a checked-out tree, so unpacking here would drop
@@ -72,6 +78,10 @@ depends=(
   'python-omegaconf'
   'python-colorlog'
   'hicolor-icon-theme'
+  'gstreamer'
+  'gst-plugins-base'
+  'gst-plugin-pipewire'
+  'xdg-desktop-portal'
 )
 
 # x86_64 only: extra/x86_64/python-onnxruntime-cpu carries
@@ -80,6 +90,9 @@ depends=(
 depends_x86_64=('python-onnxruntime-cpu')
 
 optdepends=(
+  'xdg-desktop-portal-kde: screen capture portal for KDE Plasma'
+  'uv: install the isolated Bergamot runtime'
+  'python-keyring: store API credentials in the desktop keyring'
   'grim: screen capture for live translation'
   'slurp: pick a region with the mouse'
   'wl-clipboard: read the clipboard for --ocr-copy'
