@@ -1135,28 +1135,40 @@ if _has_extra rapid; then
     fi
 fi
 if [[ "$PADDLE" == yes ]]; then
-    # Keep uv's resolver/network diagnostics: a missing ABI wheel is different
-    # from a network failure, and hiding stderr made this optional install
-    # impossible to troubleshoot. The log lives outside the project venv so it
-    # survives later environment recreation.
+    # PaddlePaddle wheels currently lag the newest CPython ABI. On Python 3.14+
+    # keep the app and GTK bindings in their normal venv, and run Paddle in a
+    # compatible sidecar interpreter through the persistent OCR worker.
     mkdir -p "$XDG_STATE"
     PADDLE_LOG="$XDG_STATE/paddle-install.log"
-    if UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv pip install \
-        --python "$VENV_DIR/bin/python" paddleocr paddlepaddle >"$PADDLE_LOG" 2>&1; then
-        if "$VENV_DIR/bin/python" -c 'import paddle, paddleocr' >>"$PADDLE_LOG" 2>&1; then
-            ok "PaddleOCR установлен и импортируется"
-            echo "  модели detection/recognition указываются в Настройки → OCR (автозагрузки нет)"
-        else
-            warn "Пакеты Paddle установлены, но не импортируются в окружении приложения:"
-            tail -n 12 "$PADDLE_LOG"
-            echo "  подробный лог: $PADDLE_LOG"
+    PADDLE_ENV="$VENV_DIR"
+    PADDLE_PYTHON="$VENV_DIR/bin/python"
+    if (( py_major > 3 || (py_major == 3 && py_minor >= 14) )); then
+        PADDLE_ENV="$STATE_DIR/paddle-venv"
+        PADDLE_PYTHON="$PADDLE_ENV/bin/python"
+        if [[ ! -x "$PADDLE_PYTHON" ]] || ! "$PADDLE_PYTHON" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 13))' >/dev/null 2>&1; then
+            rm -rf -- "$PADDLE_ENV"
+            if ! uv venv --python 3.13 "$PADDLE_ENV" >"$PADDLE_LOG" 2>&1; then
+                warn "Не удалось подготовить Python 3.13 для PaddleOCR:"
+                tail -n 12 "$PADDLE_LOG"
+                echo "  подробный лог: $PADDLE_LOG"
+                PADDLE_PYTHON=""
+            fi
         fi
+    fi
+    if [[ -n "$PADDLE_PYTHON" ]] && uv pip install \
+        --python "$PADDLE_PYTHON" paddleocr paddlepaddle >"$PADDLE_LOG" 2>&1 &&
+        "$PADDLE_PYTHON" -c 'import paddle, paddleocr' >>"$PADDLE_LOG" 2>&1; then
+        ok "PaddleOCR установлен (Python $("$PADDLE_PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])'))"
+        if [[ "$PADDLE_PYTHON" != "$VENV_DIR/bin/python" ]]; then
+            echo "  приложение будет вызывать постоянный Paddle worker из $PADDLE_ENV"
+        fi
+        echo "  модели detection/recognition указываются в Настройки → OCR (автозагрузки нет)"
     else
         warn "PaddleOCR не установлен; причина от uv:"
         tail -n 14 "$PADDLE_LOG"
         echo "  подробный лог: $PADDLE_LOG"
-        if [[ "$PYVER" == 3.14 ]]; then
-            echo "  Сейчас у paddlepaddle нет колеса cp314. Отдельный Python 3.13 не поможет приложению на 3.14: пакет должен импортироваться в основном окружении."
+        if (( py_major > 3 || (py_major == 3 && py_minor >= 14) )); then
+            echo "  Kizurium остаётся в Python $PYVER; PaddleOCR использует отдельный Python 3.13 worker, если его зависимости удалось установить."
         fi
         echo "  Остальные OCR-движки остаются доступны."
     fi
