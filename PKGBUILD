@@ -8,8 +8,8 @@
 #   git pull && makepkg -su
 
 pkgname=kizurium-translator
-pkgver=1.1.0
-pkgrel=5
+pkgver=1.2.0
+pkgrel=1
 pkgdesc="Wayland-native screen translator and OCR tool for Linux with live translation overlays"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Kizuchann/kizurium-translator"
@@ -21,16 +21,30 @@ license=('AGPL-3.0-or-later' 'Apache-2.0')
 # is already an Arch package and is listed in depends.
 _rapid_ver=3.9.2
 
-# ONNX Runtime: Arch ships the Python module as python-onnxruntime-cpu, but only
-# for x86_64 - there is no aarch64 build, so aarch64 carries the wheel. x86_64
-# users get it from pacman and never download these 21 MB.
+# CachyOS installations may not enable Arch Extra, where ONNX Runtime and some
+# RapidOCR helpers live. Bundle wheels in Kizurium's private vendor directory
+# so pacman doesn't need repository-specific Python package names.
 _ort_ver=1.30.0
 _py="cp$(python -c 'import sys; print("%d%d" % sys.version_info[:2])')"
+_omegaconf_ver=2.4.0
+_colorlog_ver=6.9.0
+_packaging_ver=26.3
 
 source=(
   "https://files.pythonhosted.org/packages/55/ed/0ee9b9281986974be9d2406ae0134c8d7c91d2fc613f16ffda9701eeda6f/rapidocr-$_rapid_ver-py3-none-any.whl"
+  "https://files.pythonhosted.org/packages/4f/bd/0d9f8247b0819385213d09564eda5c52d3673313c2414d51f72883ec24cd/omegaconf-$_omegaconf_ver-py3-none-any.whl"
+  "https://files.pythonhosted.org/packages/e3/51/9b208e85196941db2f0654ad0357ca6388ab3ed67efdbfc799f35d1f83aa/colorlog-$_colorlog_ver-py3-none-any.whl"
+  "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-$_packaging_ver-py3-none-any.whl"
 )
-sha256sums=('04d6b8d151f823d930bd91910555f57bea897c0c44fa6794267b94cf9c1ef9a0')
+sha256sums=(
+  '04d6b8d151f823d930bd91910555f57bea897c0c44fa6794267b94cf9c1ef9a0'
+  'f141a664c777582405e3cc6e0545ecc79429e79f844995b1a6e71c35946a025c'
+  '5906e71acd67cb07a71e779c47c4bcb45fb8c2993eebe9e5adcd6a6f1b283eff'
+  'd7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c'
+)
+
+source_x86_64=("https://files.pythonhosted.org/packages/f1/38/8138eed225c5bc6ddfc05879ecac7dacc63c34b9b6f99be72839c1f6dc49/onnxruntime-$_ort_ver-$_py-$_py-manylinux_2_28_x86_64.whl")
+sha256sums_x86_64=('8b611d24db2954545ce6bd9acd4670183cb368e4642450de7a9ab6474eb374ec')
 
 source_aarch64=("https://files.pythonhosted.org/packages/c6/bc/1069e58b24779ba9d2fd479db5ecb3a15a6f49b585107c898819c0789558/onnxruntime-$_ort_ver-$_py-$_py-manylinux_2_28_aarch64.whl")
 sha256sums_aarch64=('d2184fddb6798136e7c478244391ca82443f5c757f59f15bb9e5ad2da5e03175')
@@ -54,7 +68,14 @@ fi
 # makepkg matches these with in_array - an exact comparison, not a glob - so the
 # names are spelled out with the same variables the URLs use. With a glob here
 # makepkg unpacked the wheel into the Python source directory on every build.
-noextract=("rapidocr-$_rapid_ver-py3-none-any.whl" "onnxruntime-$_ort_ver-$_py-$_py-manylinux_2_28_aarch64.whl")
+noextract=(
+  "rapidocr-$_rapid_ver-py3-none-any.whl"
+  "omegaconf-$_omegaconf_ver-py3-none-any.whl"
+  "colorlog-$_colorlog_ver-py3-none-any.whl"
+  "packaging-$_packaging_ver-py3-none-any.whl"
+  "onnxruntime-$_ort_ver-$_py-$_py-manylinux_2_28_x86_64.whl"
+  "onnxruntime-$_ort_ver-$_py-$_py-manylinux_2_28_aarch64.whl"
+)
 
 depends=(
   'gtk4'
@@ -68,26 +89,21 @@ depends=(
   'python-requests'
   'tesseract'
   'tesseract-data-eng'
-  # rapidocr's own requirements, minus onnxruntime below
+  # RapidOCR and ONNX Runtime requirements supplied by CachyOS/Arch.
   'python-opencv'
   'python-pyclipper'
   'python-six'
   'python-yaml'
   'python-shapely'
   'python-tqdm'
-  'python-omegaconf'
-  'python-colorlog'
+  'python-flatbuffers'
+  'python-protobuf'
   'hicolor-icon-theme'
   'gstreamer'
   'gst-plugins-base'
   'gst-plugin-pipewire'
   'xdg-desktop-portal'
 )
-
-# x86_64 only: extra/x86_64/python-onnxruntime-cpu carries
-# site-packages/onnxruntime/__init__.py and libonnxruntime.so, so the wheel is
-# redundant there. extra/aarch64 has no such package.
-depends_x86_64=('python-onnxruntime-cpu')
 
 optdepends=(
   'xdg-desktop-portal-kde: screen capture portal for KDE Plasma'
@@ -120,10 +136,15 @@ package() {
     python -m installer --destdir="$pkgdir" dist/*.whl
     python -m installer --destdir="$pkgdir" \
         "$srcdir/rapidocr-$_rapid_ver-py3-none-any.whl"
-    if [[ "$CARCH" == aarch64 ]]; then
-        python -m installer --destdir="$pkgdir" \
-            "$srcdir/onnxruntime-$_ort_ver-$_py-$_py-manylinux_2_28_aarch64.whl"
-    fi
+    vendor_dir="$pkgdir/usr/lib/python$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')/site-packages/kizurium_translator/_vendor"
+    mkdir -p "$vendor_dir"
+    for wheel in \
+        "$srcdir/omegaconf-$_omegaconf_ver-py3-none-any.whl" \
+        "$srcdir/colorlog-$_colorlog_ver-py3-none-any.whl" \
+        "$srcdir/packaging-$_packaging_ver-py3-none-any.whl" \
+        "$srcdir/onnxruntime-$_ort_ver-$_py-$_py-manylinux_2_28_$CARCH.whl"; do
+        python -m zipfile -e "$wheel" "$vendor_dir"
+    done
 
     install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm644 "LICENSE.header" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.header"

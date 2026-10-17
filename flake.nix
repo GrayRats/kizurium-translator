@@ -34,7 +34,7 @@
           python = pkgs.python3;
           kizurium-translator = python.pkgs.buildPythonApplication {
             pname = "kizurium-translator";
-            version = "1.1.0";
+            version = "1.2.0";
             pyproject = true;
             src = pkgs.lib.cleanSourceWith {
               src = self;
@@ -236,7 +236,7 @@
         {
           tests = python.pkgs.buildPythonApplication {
             pname = "kizurium-translator-tests";
-            version = "1.1.0";
+            version = "1.2.0";
             pyproject = true;
             src = self;
             build-system = with python.pkgs; [ hatchling ];
