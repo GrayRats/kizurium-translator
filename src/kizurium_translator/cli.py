@@ -809,7 +809,7 @@ def cmd_model_status(conf: Config) -> int:
     kind = bg.runtime_kind()
     print("\nBergamot (локальный перевод):")
     print(f"  {'✓' if kind else '✗'} движок: "
-          + {"in-process": "установлен (в основном Python)", "helper": f"установлен (отдельный Python {bg.HELPER_PYTHON})"}.get(
+          + {"in-process": "установлен (в основном Python)", "helper": f"установлен ({bg.helper_python()})", "system": f"установлен ({bg.system_python()})"}.get(
               kind, "нет — kizurium-translator --bergamot-runtime-install (без него работают офлайн-паки OPUS-MT)"))
     root = bg.cache_root()
     found = False

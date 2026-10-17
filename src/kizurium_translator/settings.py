@@ -102,29 +102,29 @@ class SettingsWindow:
         self.entry(models, "bergamot_model_path", "Путь к модели Bergamot", cfg.bergamot_model_path, "Каталог с kizurium-model.json, конфигурацией и файлами модели; выше приоритетом, чем кэш")
         self.button(models, "Выбрать каталог модели…", self.choose_model)
         models.append(Gtk.Label(label="Пара языков берётся из вкладки «Перевод». Для локальной модели укажите исходный язык явно.", wrap=True, xalign=0))
-        from .translation.bergamot import RUNTIME_MISSING, runtime_kind
-
-        kind = runtime_kind()
-        runtime = Gtk.Label(wrap=True, xalign=0)
-        runtime.set_label({"in-process": "Движок Bergamot: установлен",
-                           "helper": "Движок Bergamot: установлен (отдельный Python 3.10)"}.get(kind, RUNTIME_MISSING))
-        models.append(runtime)
-        self.runtime_label = runtime
-        if not kind:
-            self.runtime_button = self.button(models, "Установить движок Bergamot", self.install_runtime)
-            self.runtime_button.set_tooltip_text("Скачает Python 3.10 и пакет bergamot (нужны uv и сеть); "
-                                                 "в автономном режиме недоступно")
+        self._runtime_busy = False
+        self._runtime_found = False
+        self.runtime_label = Gtk.Label(label="Проверяю движок Bergamot…", wrap=True, xalign=0, selectable=True)
+        models.append(self.runtime_label)
+        self.runtime_button = self.button(models, "Установить движок Bergamot", self.install_runtime)
+        self.runtime_button.set_tooltip_text("Установит отдельное окружение Python 3.10; нужны uv и сеть")
+        self.runtime_refresh = self.button(models, "Проверить установленный движок", self.scan_runtime)
         self.model_status = Gtk.Label(label=controller.models.status, wrap=True, xalign=0, selectable=True)
         models.append(self.model_status)
         self.progress = Gtk.ProgressBar(show_text=True)
         models.append(self.progress)
+        self.download_buttons = []
         for action, label in (("verify", "Найти / проверить модель"), ("download", "Загрузить модель"), ("redownload", "Загрузить заново"), ("remove", "Удалить модель из кэша Kizurium")):
-            self.button(models, label, lambda _b, a=action: self.model_action(a))
+            button = self.button(models, label, lambda _b, a=action: self.model_action(a))
+            if action in {"download", "redownload"}:
+                self.download_buttons.append(button)
         self.button(models, "Отменить операцию", lambda _b: controller.models.cancel())
         self.installed = Gtk.Label(wrap=True, selectable=True, xalign=0)
         models.append(self.installed)
         self.button(models, "Обновить список моделей", self.list_models)
         self.list_models()
+        controller.settings_listeners.append(self.sync_runtime_actions)
+        self.scan_runtime()
 
         appearance = page("Внешний вид")
         appearance.append(Gtk.Label(label="Существующий оверлей сохраняет геометрию и автоматически подбирает типографику под текст на экране.", wrap=True, xalign=0))
@@ -273,28 +273,54 @@ class SettingsWindow:
         except Exception as exc:
             self.note.set_label("Операция не начата: " + str(exc))
 
-    def install_runtime(self, *_):
-        if self.controller.conf.offline_only:
-            self.note.set_label("Автономный режим: загрузка движка запрещена")
+    def sync_runtime_actions(self):
+        online = not self.controller.conf.offline_only
+        self.runtime_button.set_sensitive(online and not self._runtime_busy and not self._runtime_found)
+        self.runtime_refresh.set_sensitive(not self._runtime_busy)
+        for button in self.download_buttons:
+            button.set_sensitive(online and self._runtime_found and not self._runtime_busy)
+
+    def scan_runtime(self, *_):
+        if self._runtime_busy:
             return
-        from .translation.bergamot import install_runtime, runtime_kind
+        from .translation.bergamot import refresh_runtime, helper_python, system_python, RUNTIME_MISSING
+        self._runtime_busy = True
+        self.runtime_label.set_label("Проверяю движок Bergamot…")
+        self.sync_runtime_actions()
 
-        self.runtime_button.set_sensitive(False)
+        def work():
+            kind = refresh_runtime()
+            path = helper_python() if kind == "helper" else system_python() if kind == "system" else "Python приложения"
+            return kind, str(path)
+
+        def done(result):
+            kind, path = result
+            self._runtime_busy = False
+            self._runtime_found = bool(kind)
+            self.runtime_label.set_label(f"Движок Bergamot: {path}" if kind else RUNTIME_MISSING)
+            self.sync_runtime_actions()
+        self.controller.background(work, done)
+
+    def install_runtime(self, *_):
+        if self._runtime_busy or self.controller.conf.offline_only:
+            return
+        from .translation.bergamot import install_runtime
+        self._runtime_busy = True
+        self.sync_runtime_actions()
         self.runtime_label.set_label("Устанавливаю движок Bergamot…")
-
-        def done(_):
-            ok = bool(runtime_kind())
-            self.runtime_label.set_label("Движок Bergamot: установлен (отдельный Python 3.10)" if ok else
-                                         "Не удалось установить движок Bergamot (см. Диагностика)")
-            self.runtime_button.set_sensitive(not ok)
-            self.controller.message("Движок Bergamot готов" if ok else "Движок Bergamot не установлен")
 
         def work():
             try:
                 install_runtime()
-            except Exception:  # noqa: BLE001 - done() reports the outcome by checking the engine
-                pass
+                return ""
+            except Exception as exc:
+                return str(exc)
 
+        def done(error):
+            self._runtime_busy = False
+            if error:
+                self.note.set_label("Не удалось установить Bergamot: " + error)
+            self.scan_runtime()
         self.controller.background(work, done)
 
     def choose_model(self, *_):
