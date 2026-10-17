@@ -1135,11 +1135,30 @@ if _has_extra rapid; then
     fi
 fi
 if [[ "$PADDLE" == yes ]]; then
-    if UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv pip install --python "$VENV_DIR/bin/python" paddleocr paddlepaddle >/dev/null 2>&1; then
-        ok "PaddleOCR установлен"
-        echo "  модели detection/recognition указываются в Настройки → OCR (автозагрузки нет)"
+    # Keep uv's resolver/network diagnostics: a missing ABI wheel is different
+    # from a network failure, and hiding stderr made this optional install
+    # impossible to troubleshoot. The log lives outside the project venv so it
+    # survives later environment recreation.
+    mkdir -p "$XDG_STATE"
+    PADDLE_LOG="$XDG_STATE/paddle-install.log"
+    if UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv pip install \
+        --python "$VENV_DIR/bin/python" paddleocr paddlepaddle >"$PADDLE_LOG" 2>&1; then
+        if "$VENV_DIR/bin/python" -c 'import paddle, paddleocr' >>"$PADDLE_LOG" 2>&1; then
+            ok "PaddleOCR установлен и импортируется"
+            echo "  модели detection/recognition указываются в Настройки → OCR (автозагрузки нет)"
+        else
+            warn "Пакеты Paddle установлены, но не импортируются в окружении приложения:"
+            tail -n 12 "$PADDLE_LOG"
+            echo "  подробный лог: $PADDLE_LOG"
+        fi
     else
-        warn "PaddleOCR не установился (нет колеса для Python $PYVER или нет сети) — остальное работает"
+        warn "PaddleOCR не установлен; причина от uv:"
+        tail -n 14 "$PADDLE_LOG"
+        echo "  подробный лог: $PADDLE_LOG"
+        if [[ "$PYVER" == 3.14 ]]; then
+            echo "  Сейчас у paddlepaddle нет колеса cp314. Отдельный Python 3.13 не поможет приложению на 3.14: пакет должен импортироваться в основном окружении."
+        fi
+        echo "  Остальные OCR-движки остаются доступны."
     fi
 fi
 
