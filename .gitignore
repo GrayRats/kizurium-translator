@@ -43,3 +43,9 @@ result-*
 AGENTS.md
 
 .makepkg/
+
+# Optional Rust kernel and local compatibility toolchain
+native/target/
+.tools/
+
+!native/Cargo.lock
