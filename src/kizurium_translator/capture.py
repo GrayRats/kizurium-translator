@@ -45,9 +45,14 @@ class KWinNotAuthorized(CaptureError):
     """KWin refused ScreenShot2 to this process; the portal is the supported route."""
 
 
+class KWinUnsupported(CaptureError):
+    """KWin answered in a layout this code cannot read; that does not change mid-session."""
+
+
 log = logging.getLogger(__name__)
 # None: not tried yet. True: KWin answered. A string: why it was refused.
 _kwin_state: bool | str | None = None
+_kwin_last_transient = ""
 _frame_request = threading.local()
 _portal_parent = ""
 
@@ -183,16 +188,27 @@ def select_output() -> str:
 
 
 def kde_capture(geom: str):
-    """KWin ScreenShot2 where KWin allows it, otherwise the portal, said out loud."""
-    global _kwin_state
+    """KWin ScreenShot2 where KWin allows it, otherwise the portal, said out loud.
+
+    A refusal that will not change (not authorized, a layout we cannot read) is
+    remembered for the process. A one-off failure (a timeout, an interrupted
+    read) sends only that frame to the portal, so one hiccup does not demote the
+    faster backend until the next restart.
+    """
+    global _kwin_state, _kwin_last_transient
     if _kwin_state is None or _kwin_state is True:
         try:
             image = kwin_capture(geom)
-        except KWinNotAuthorized as exc:
+        except (KWinNotAuthorized, KWinUnsupported) as exc:
             _kwin_state = str(exc)
             log.warning("capture: KWin ScreenShot2 refused (%s); using the XDG ScreenCast portal", exc)
+        except CaptureError as exc:
+            if str(exc) != _kwin_last_transient:  # one line per distinct failure, not per frame
+                log.warning("capture: KWin ScreenShot2 failed (%s); portal for this frame", exc)
+            _kwin_last_transient = str(exc)
         else:
             _kwin_state = True
+            _kwin_last_transient = ""
             return image
     return portal_capture(geom)
 
@@ -206,12 +222,49 @@ def capture_backend() -> str:
     return "untried"
 
 
+def _kwin_image_layout(info):
+    """QImage formats returned by ScreenShot2 (byte order matters).
+
+    https://doc.qt.io/qt-6/qimage.html#Format-enum
+    RGB32/ARGB32 are native-endian; RGBX8888/RGBA8888 are byte-ordered.
+    """
+    layouts = {
+        4: ("RGB", "BGRX"),
+        5: ("RGBA", "BGRA"),
+        6: ("RGBa", "BGRa"),
+        16: ("RGB", "RGBX"),
+        17: ("RGBA", "RGBA"),
+        18: ("RGBa", "RGBa"),
+    }
+    try:
+        width, height, stride, fmt = (int(info[key]) for key in ("width", "height", "stride", "format"))
+        mode, raw_mode = layouts[fmt]
+    except (KeyError, TypeError, ValueError):
+        raise KWinUnsupported(f"Unsupported KWin screenshot format: {info.get('format')}") from None
+    if fmt in (4, 5, 6) and sys.byteorder != "little":
+        raise KWinUnsupported("Unsupported native-endian KWin screenshot format")
+    if width <= 0 or height <= 0 or stride < width * 4 or not 0 < stride * height <= 256 * 1024 * 1024:
+        raise CaptureError("Invalid KWin screenshot dimensions or stride")
+    return width, height, stride, mode, raw_mode
+
+
+def _decode_kwin_image(data: bytes, info):
+    from PIL import Image
+
+    width, height, stride, mode, raw_mode = _kwin_image_layout(info)
+    if len(data) != stride * height:
+        raise CaptureError("KWin screenshot interrupted")
+    image = Image.frombytes(mode, (width, height), data, "raw", raw_mode, stride)
+    if mode == "RGBa":
+        image = image.convert("RGBA")
+    return image.convert("RGB")
+
+
 def kwin_capture(geom: str):
     """KWin ScreenShot2 raw FD transport; blocking, called only from capture workers."""
     import select
 
     from gi.repository import Gio, GLib
-    from PIL import Image
 
     x, y, width, height = parse_geom(geom)
     read_fd, write_fd = os.pipe()
@@ -224,9 +277,8 @@ def kwin_capture(geom: str):
             GLib.Variant("(iiuua{sv}h)", (x, y, width, height, {"include-cursor": GLib.Variant("b", False)}, index)),
             GLib.VariantType.new("(a{sv})"), Gio.DBusCallFlags.NONE, 5000, fds, None)
         info = reply.unpack()[0]
-        size = int(info["stride"]) * int(info["height"])
-        if not 0 < size <= 256 * 1024 * 1024 or info["format"] not in (4, 5, 6):
-            raise CaptureError("Unsupported KWin screenshot format or size")
+        _, image_height, stride, _, _ = _kwin_image_layout(info)
+        size = stride * image_height
         chunks, count, deadline = [], 0, time.monotonic() + 5
         while count < size:
             remaining = deadline - time.monotonic()
@@ -237,9 +289,8 @@ def kwin_capture(geom: str):
                 raise CaptureError("KWin screenshot interrupted")
             chunks.append(chunk)
             count += len(chunk)
-        image = Image.frombytes(
-            "RGBA", (info["width"], info["height"]), b"".join(chunks), "raw", "BGRA", info["stride"])
-        return image.convert("RGB").resize((width, height))
+        image = _decode_kwin_image(b"".join(chunks), info)
+        return image if image.size == (width, height) else image.resize((width, height))
     except GLib.Error as exc:
         if "NoAuthorized" in exc.message or "NoAuthorized" in str(exc):
             raise KWinNotAuthorized(exc.message) from None

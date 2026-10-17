@@ -266,6 +266,58 @@ def drop_self_echo(
     return _Echo(False, lines, last_key, last_clean)
 
 
+def _norm_words(text: str) -> str:
+    return " ".join(re.findall(r"[\w']+", str(text).lower()))
+
+
+def _similar_text(a: str, b: str, threshold: float = 0.85) -> bool:
+    """The same line read twice differs by a letter or two (``can`` / ``ean``), not by words."""
+    import difflib
+
+    return bool(a) and bool(b) and difflib.SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+def drop_paragraph_echoes(lines: list) -> list:
+    """Remove a standalone line that is just a piece of a paragraph already read.
+
+    A wider detector reads the same text twice: once as part of a merged paragraph
+    (``line_boxes``) and once as a line of its own. Both become cards, and the two
+    are drawn over each other in different faces. A line is an echo only when it lies
+    inside one of the paragraph's boxes AND its words are a run of that box's words, so
+    two different lines that merely share a region are both kept. The words are compared
+    loosely: the same line is rarely read letter for letter twice.
+    """
+    if len(lines) < 2:
+        return lines
+    keep = []
+    for cand in lines:
+        if cand.get("line_boxes"):
+            keep.append(cand)
+            continue
+        cx1, cy1, cx2, cy2 = (float(v) for v in cand["box"])
+        area = max(1.0, (cx2 - cx1) * (cy2 - cy1))
+        words = _norm_words(cand.get("text", ""))
+        echo = False
+        for par in lines:
+            if par is cand or not par.get("line_boxes"):
+                continue
+            for lb in par["line_boxes"]:
+                bx1, by1, bx2, by2 = (float(v) for v in lb["box"])
+                iw, ih = min(cx2, bx2) - max(cx1, bx1), min(cy2, by2) - max(cy1, by1)
+                if iw <= 0 or ih <= 0 or (iw * ih) / area < 0.8:
+                    continue
+                if len(words) >= 8 and _similar_text(words, _norm_words(lb.get("text", ""))):
+                    echo = True
+                    break
+            if echo:
+                break
+        if echo:
+            tdetail(f"paragraph-echo dropped {cand['text'][:40]!r}")
+        else:
+            keep.append(cand)
+    return keep
+
+
 def arrange_lines(
     lines, region_img, rw, rh, blocks_now, japanese_mode, subtitle_mode,
     eng_ui_mode, last_ocr_lang,
@@ -484,6 +536,7 @@ def arrange_lines(
             or p.get("kind") in ("chip", "latin", "menu", "name")
         )
     ]
+    lines = drop_paragraph_echoes(lines)
     if eng_ui_mode:
         log_eng_ui_lines("final-ui", lines)
         if len(lines) != n_before_split:

@@ -24,6 +24,8 @@ class SettingsWindow:
         self.Gtk, self.controller = Gtk, controller
         self.fields = {}
         self.provider_fields = {}
+        self.provider_drafts = {}
+        self._shown_provider = None
         cfg = controller.conf
         self.win = Gtk.ApplicationWindow(application=controller.app, title="Kizurium — Настройки")
         self.win.set_default_size(560, 520)
@@ -60,7 +62,7 @@ class SettingsWindow:
         general.append(self.offline)
         self.auto = Gtk.CheckButton(label="Автоматический OCR и перевод")
         self.auto.set_active(controller.live is not None)
-        self.auto.connect("toggled", lambda b: controller.dispatch("start-auto-translate" if b.get_active() else "stop-auto-translate"))
+        self._auto_handler = self.auto.connect("toggled", lambda b: controller.dispatch("start-auto-translate" if b.get_active() else "stop-auto-translate"))
         general.append(self.auto)
         general.append(Gtk.Label(label="Закрытие окна скрывает приложение в системный трей. Выход завершает все операции.", wrap=True, xalign=0))
 
@@ -100,29 +102,29 @@ class SettingsWindow:
         self.entry(models, "bergamot_model_path", "Путь к модели Bergamot", cfg.bergamot_model_path, "Каталог с kizurium-model.json, конфигурацией и файлами модели; выше приоритетом, чем кэш")
         self.button(models, "Выбрать каталог модели…", self.choose_model)
         models.append(Gtk.Label(label="Пара языков берётся из вкладки «Перевод». Для локальной модели укажите исходный язык явно.", wrap=True, xalign=0))
-        from .translation.bergamot import RUNTIME_MISSING, runtime_kind
-
-        kind = runtime_kind()
-        runtime = Gtk.Label(wrap=True, xalign=0)
-        runtime.set_label({"in-process": "Движок Bergamot: установлен",
-                           "helper": "Движок Bergamot: установлен (отдельный Python 3.10)"}.get(kind, RUNTIME_MISSING))
-        models.append(runtime)
-        self.runtime_label = runtime
-        if not kind:
-            self.runtime_button = self.button(models, "Установить движок Bergamot", self.install_runtime)
-            self.runtime_button.set_tooltip_text("Скачает Python 3.10 и пакет bergamot (нужны uv и сеть); "
-                                                 "в автономном режиме недоступно")
+        self._runtime_busy = False
+        self._runtime_found = False
+        self.runtime_label = Gtk.Label(label="Проверяю движок Bergamot…", wrap=True, xalign=0, selectable=True)
+        models.append(self.runtime_label)
+        self.runtime_button = self.button(models, "Установить движок Bergamot", self.install_runtime)
+        self.runtime_button.set_tooltip_text("Установит отдельное окружение Python 3.10; нужны uv и сеть")
+        self.runtime_refresh = self.button(models, "Проверить установленный движок", self.scan_runtime)
         self.model_status = Gtk.Label(label=controller.models.status, wrap=True, xalign=0, selectable=True)
         models.append(self.model_status)
         self.progress = Gtk.ProgressBar(show_text=True)
         models.append(self.progress)
+        self.download_buttons = []
         for action, label in (("verify", "Найти / проверить модель"), ("download", "Загрузить модель"), ("redownload", "Загрузить заново"), ("remove", "Удалить модель из кэша Kizurium")):
-            self.button(models, label, lambda _b, a=action: self.model_action(a))
+            button = self.button(models, label, lambda _b, a=action: self.model_action(a))
+            if action in {"download", "redownload"}:
+                self.download_buttons.append(button)
         self.button(models, "Отменить операцию", lambda _b: controller.models.cancel())
         self.installed = Gtk.Label(wrap=True, selectable=True, xalign=0)
         models.append(self.installed)
         self.button(models, "Обновить список моделей", self.list_models)
         self.list_models()
+        controller.settings_listeners.append(self.sync_runtime_actions)
+        self.scan_runtime()
 
         appearance = page("Внешний вид")
         appearance.append(Gtk.Label(label="Существующий оверлей сохраняет геометрию и автоматически подбирает типографику под текст на экране.", wrap=True, xalign=0))
@@ -140,6 +142,13 @@ class SettingsWindow:
         advanced.append(self.diagnostic_text)
         self.win.connect("close-request", self.close)
 
+    def set_auto_active(self, active):
+        self.auto.handler_block(self._auto_handler)
+        try:
+            self.auto.set_active(active)
+        finally:
+            self.auto.handler_unblock(self._auto_handler)
+
     def close(self, *_):
         self.win.set_visible(False)
         return True
@@ -151,7 +160,7 @@ class SettingsWindow:
         return button
 
     def entry(self, box, key, label, value, tooltip="", password=False, fields=None):
-        box.append(self.Gtk.Label(label=label, xalign=0))
+        box.append(self.Gtk.Label(label=label, xalign=0, wrap=True))
         widget = self.Gtk.Entry()
         widget.set_text(str(value))
         widget.set_visibility(not password)
@@ -162,14 +171,19 @@ class SettingsWindow:
         return widget
 
     def dropdown(self, box, label, values, selected):
-        box.append(self.Gtk.Label(label=label, xalign=0))
+        box.append(self.Gtk.Label(label=label, xalign=0, wrap=True))
         dropdown = self.Gtk.DropDown.new_from_strings(values)
         dropdown.set_selected(selected)
         box.append(dropdown)
         return dropdown
 
     def provider_changed(self, *_):
+        if self._shown_provider is not None:
+            self.provider_drafts[self._shown_provider] = {
+                key: field.get_text() for key, field in self.provider_fields.items()
+            }
         pid = self.provider_codes[self.provider.get_selected()]
+        self._shown_provider = pid
         self.description.set_label(DESCRIPTIONS[pid])
         child = self.provider_box.get_first_child()
         while child:
@@ -177,7 +191,7 @@ class SettingsWindow:
             self.provider_box.remove(child)
             child = nxt
         self.provider_fields = {}
-        options = self.controller.conf.provider_options.get(pid, {})
+        options = self.provider_drafts.get(pid, self.controller.conf.provider_options.get(pid, {}))
         schema = {
             "google": [("timeout", "HTTP timeout, с", "15")],
             "yandex": [("auth", "Авторизация: api-key / iam", "api-key"), ("folder_id", "Folder ID", "")],
@@ -191,7 +205,7 @@ class SettingsWindow:
                 value = json.dumps(value, ensure_ascii=False)
             self.entry(self.provider_box, key, label, value, fields=self.provider_fields, password=key == "headers")
         if pid not in {"google", "bergamot"}:
-            self.entry(self.provider_box, "key", "Новый API key / token (пусто — оставить сохранённый)", "", "Хранится в KWallet / Secret Service. Альтернатива: KIZURIUM_<PROVIDER>_API_KEY", password=True, fields=self.provider_fields)
+            self.entry(self.provider_box, "key", "Новый API key / token (пусто — оставить сохранённый)", options.get("key", ""), "Хранится в KWallet / Secret Service. Альтернатива: KIZURIUM_<PROVIDER>_API_KEY", password=True, fields=self.provider_fields)
 
     def config(self):
         cfg = self.controller.conf
@@ -259,28 +273,54 @@ class SettingsWindow:
         except Exception as exc:
             self.note.set_label("Операция не начата: " + str(exc))
 
-    def install_runtime(self, *_):
-        if self.controller.conf.offline_only:
-            self.note.set_label("Автономный режим: загрузка движка запрещена")
+    def sync_runtime_actions(self):
+        online = not self.controller.conf.offline_only
+        self.runtime_button.set_sensitive(online and not self._runtime_busy and not self._runtime_found)
+        self.runtime_refresh.set_sensitive(not self._runtime_busy)
+        for button in self.download_buttons:
+            button.set_sensitive(online and self._runtime_found and not self._runtime_busy)
+
+    def scan_runtime(self, *_):
+        if self._runtime_busy:
             return
-        from .translation.bergamot import install_runtime, runtime_kind
+        from .translation.bergamot import refresh_runtime, helper_python, system_python, RUNTIME_MISSING
+        self._runtime_busy = True
+        self.runtime_label.set_label("Проверяю движок Bergamot…")
+        self.sync_runtime_actions()
 
-        self.runtime_button.set_sensitive(False)
+        def work():
+            kind = refresh_runtime()
+            path = helper_python() if kind == "helper" else system_python() if kind == "system" else "Python приложения"
+            return kind, str(path)
+
+        def done(result):
+            kind, path = result
+            self._runtime_busy = False
+            self._runtime_found = bool(kind)
+            self.runtime_label.set_label(f"Движок Bergamot: {path}" if kind else RUNTIME_MISSING)
+            self.sync_runtime_actions()
+        self.controller.background(work, done)
+
+    def install_runtime(self, *_):
+        if self._runtime_busy or self.controller.conf.offline_only:
+            return
+        from .translation.bergamot import install_runtime
+        self._runtime_busy = True
+        self.sync_runtime_actions()
         self.runtime_label.set_label("Устанавливаю движок Bergamot…")
-
-        def done(_):
-            ok = bool(runtime_kind())
-            self.runtime_label.set_label("Движок Bergamot: установлен (отдельный Python 3.10)" if ok else
-                                         "Не удалось установить движок Bergamot (см. Диагностика)")
-            self.runtime_button.set_sensitive(not ok)
-            self.controller.message("Движок Bergamot готов" if ok else "Движок Bergamot не установлен")
 
         def work():
             try:
                 install_runtime()
-            except Exception:  # noqa: BLE001 - done() reports the outcome by checking the engine
-                pass
+                return ""
+            except Exception as exc:
+                return str(exc)
 
+        def done(error):
+            self._runtime_busy = False
+            if error:
+                self.note.set_label("Не удалось установить Bergamot: " + error)
+            self.scan_runtime()
         self.controller.background(work, done)
 
     def choose_model(self, *_):

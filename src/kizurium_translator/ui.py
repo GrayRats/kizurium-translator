@@ -154,22 +154,23 @@ def text_window(
         win = Gtk.ApplicationWindow(application=app)
         win_ref.append(win)
         win.set_title("Переводчик")
+        win.add_css_class("kizurium-text")
         win.set_default_size(WIN_W, WIN_H)
         win.set_resizable(True)
 
         css = Gtk.CssProvider()
         css.load_from_data(
             b"""
-            window { background-color: #1f1f1f; }
-.card { background-color: #2b2b2b; border-radius: 12px; }
-.big textview,.big textview text {
+window.kizurium-text { background-color: #1f1f1f; }
+window.kizurium-text .card { background-color: #2b2b2b; border-radius: 12px; }
+window.kizurium-text .big textview, window.kizurium-text .big textview text {
               background-color: transparent;
               color: #e8eaed;
               font-size: 22px;
             }
-.roman { color: #9aa0a6; font-size: 13px; }
-.hint { color: #9aa0a6; font-size: 12px; }
-.swap {
+window.kizurium-text .roman { color: #9aa0a6; font-size: 13px; }
+window.kizurium-text .hint { color: #9aa0a6; font-size: 12px; }
+window.kizurium-text .swap {
               background-color: transparent;
               color: #e8eaed;
               border: none;
@@ -178,8 +179,8 @@ def text_window(
               min-height: 36px;
               border-radius: 18px;
             }
-.swap:hover { background-color: rgba(255,255,255,0.08); }
-.iconbtn {
+window.kizurium-text .swap:hover { background-color: rgba(255,255,255,0.08); }
+window.kizurium-text .iconbtn {
               background-color: transparent;
               color: #9aa0a6;
               border: none;
@@ -187,10 +188,10 @@ def text_window(
               min-width: 36px;
               min-height: 36px;
             }
-.iconbtn:hover { background-color: rgba(255,255,255,0.08); color: #e8eaed; }
-            dropdown { min-height: 36px; min-width: 150px; }
-.status { color: #9aa0a6; font-size: 12px; }
-.status-err { color: #f28b82; }
+window.kizurium-text .iconbtn:hover { background-color: rgba(255,255,255,0.08); color: #e8eaed; }
+window.kizurium-text dropdown { min-height: 36px; min-width: 150px; }
+window.kizurium-text .status { color: #9aa0a6; font-size: 12px; }
+window.kizurium-text .status-err { color: #f28b82; }
             """
         )
         Gtk.StyleContext.add_provider_for_display(

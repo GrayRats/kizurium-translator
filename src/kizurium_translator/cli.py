@@ -24,7 +24,8 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import capture, selector, ui
+from . import capture, selector
+from . import ui as ui
 from .config import Config, config_path, load, provider_options
 from .paths import default_paths
 from .translate import Translator
@@ -808,7 +809,7 @@ def cmd_model_status(conf: Config) -> int:
     kind = bg.runtime_kind()
     print("\nBergamot (локальный перевод):")
     print(f"  {'✓' if kind else '✗'} движок: "
-          + {"in-process": "установлен (в основном Python)", "helper": f"установлен (отдельный Python {bg.HELPER_PYTHON})"}.get(
+          + {"in-process": "установлен (в основном Python)", "helper": f"установлен ({bg.helper_python()})", "system": f"установлен ({bg.system_python()})"}.get(
               kind, "нет — kizurium-translator --bergamot-runtime-install (без него работают офлайн-паки OPUS-MT)"))
     root = bg.cache_root()
     found = False
@@ -1178,10 +1179,10 @@ def cmd_doctor(conf: Config) -> int:
             res = subprocess.run(
                 [tess, "--list-langs"], capture_output=True, text=True, timeout=5, check=False
             )
-            langs = [l.strip() for l in res.stdout.splitlines()[1:] if l.strip()]
+            langs = [lang.strip() for lang in res.stdout.splitlines()[1:] if lang.strip()]
         except (OSError, subprocess.SubprocessError):
             langs = []
-        missing = [l for l in REQUIRED_LANGS if l not in langs]
+        missing = [lang for lang in REQUIRED_LANGS if lang not in langs]
         ocr.add(
             "tesseract + eng/rus",
             Status.OK if not missing else Status.MISSING,
@@ -1222,21 +1223,23 @@ def cmd_doctor(conf: Config) -> int:
             "deep_translator", "deep-translator", hint="нет (uv sync --extra deep-translate)"
         )
     )
-    # `conf.offline_only` asks whether the online fallback is available, and whether it is on.
-    # These are different questions: an installed backend the user turned off is
-    # DISABLED, not MISSING.
-    if conf.offline_only:
-        translation.add(
-            "online fallback",
-            Status.DISABLED,
-            detail="offline_only в конфиге — сеть не используется",
-        )
-    elif conf.use_gtx:
-        translation.add("translation provider", Status.OK, detail=conf.translation_provider + "; no cloud fallback")
-    else:
-        translation.add(
-            "online fallback", Status.DISABLED, detail="use_gtx=false в конфиге"
-        )
+    provider = conf.translation_provider
+    requires_network = provider != "bergamot"
+    enabled = not requires_network or (not conf.offline_only and
+                                       (provider != "google" or conf.use_gtx))
+    translation.add(
+        "translation provider",
+        Status.OK if enabled else Status.DISABLED,
+        detail=provider + ("; local/offline" if not requires_network else "; network required"),
+    )
+    translation.add(
+        "online fallback", Status.DISABLED,
+        detail="выбранный провайдер используется без автоматической смены сервиса",
+    )
+    translation.add(
+        "HTTP 429 handling", Status.OK,
+        detail="очередь, задержка, ограниченные повторы и cooldown; доступность сервиса не проверялась",
+    )
 
     # --- Models: what is installed, not what is available. ---
     try:

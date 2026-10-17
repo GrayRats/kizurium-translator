@@ -38,6 +38,7 @@ class DesktopController:
         self.selection_cancel = Gio.Cancellable()
         self.pending_start = False
         self._starting = False
+        self._selection_revision = 0
         self._portal_parent_surface = None
         self.models = ModelManager(lambda: self.conf.offline_only, self.model_changed)
         live.configure(conf)
@@ -174,12 +175,15 @@ class DesktopController:
         except Exception as exc:
             self.message("Action failed: " + type(exc).__name__)
             log.exception("operation=desktop-action action=%s", action)
+        finally:
+            self.sync_auto()
 
     def open_selector(self):
         """The normal region selector, answered with the action chosen on its toolbar."""
         if self.selecting or self.closing:
             return
         self.selecting = True
+        revision = self._selection_revision
         from .selector import SelectorError, select_region
 
         def pick():
@@ -190,6 +194,8 @@ class DesktopController:
 
         def done(result):
             self.selecting = False
+            if revision != self._selection_revision:
+                return
             action, geom = result
             if action == "error":
                 self.message("Выбор области недоступен: " + geom)
@@ -242,6 +248,8 @@ class DesktopController:
                 except Exception as exc:
                     self.pending_start = False
                     self.message("Window selection cancelled or unavailable: " + type(exc).__name__)
+                finally:
+                    self.sync_auto()
             bus.call("org.kde.KWin", "/KWin", "org.kde.KWin", "queryWindowInfo", None,
                      self.GLib.VariantType.new("(a{sv})"), self.Gio.DBusCallFlags.NONE, 60000, self.selection_cancel, selected)
         else:
@@ -254,6 +262,7 @@ class DesktopController:
                 self.pending_start = False
                 if start:
                     self.start_live()
+                self.sync_auto()
             self.background(lambda: select_region(auto_action="live"), selected)
 
     def start_live(self):
@@ -283,6 +292,7 @@ class DesktopController:
                 if not self.pending_start or self.closing:
                     return
                 self.pending_start = False
+                self.sync_auto()
                 ok, error = result
                 if not ok:
                     self.message("Захват недоступен: " + error)
@@ -332,6 +342,7 @@ class DesktopController:
     def stop_live(self):
         from .capture import cancel_capture_request
         self.pending_start = False
+        self._selection_revision += 1
         cancel_capture_request()
         if self.live:
             self.live["close"]()
@@ -343,9 +354,9 @@ class DesktopController:
 
     def sync_auto(self):
         if self.settings:
-            active = self.live is not None
+            active = self.live is not None or self.pending_start
             if self.settings.auto.get_active() != active:
-                self.settings.auto.set_active(active)
+                self.settings.set_auto_active(active)
 
     def test_connection(self, cfg, done):
         from .cli import make_translator

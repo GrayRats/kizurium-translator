@@ -13,6 +13,9 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
+from functools import lru_cache
 import tarfile
 import tempfile
 import threading
@@ -68,20 +71,68 @@ def runtime_dir():
 
 
 def helper_python():
-    """The helper interpreter, only once the installer has verified it imports bergamot."""
+    """Private interpreter with working bindings, including manually installed ones."""
     python = runtime_dir() / "venv" / "bin" / "python"
-    return python if python.is_file() and (runtime_dir() / "ok").is_file() else None
+    if python.is_file() and _probe_python(str(python), python.stat().st_mtime_ns):
+        return python
+    return None
 
 
 def in_process_available():
-    return importlib.util.find_spec("bergamot") is not None and importlib.util.find_spec("yaml") is not None
+    return (importlib.util.find_spec("bergamot") is not None
+            and importlib.util.find_spec("yaml") is not None
+            and _probe_python(sys.executable, Path(sys.executable).stat().st_mtime_ns))
+
+
+@lru_cache(maxsize=32)
+def _probe_python(python, modified):
+    """Import native bindings in isolation: a present but broken .so is not usable."""
+    try:
+        result = subprocess.run(
+            [python, "-I", "-c", "import bergamot, yaml; assert all(hasattr(bergamot, n) for n in ('Service', 'VectorString', 'ResponseOptions'))"],
+            capture_output=True, timeout=15, check=False)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def system_python():
+    """Find bindings installed outside the application's virtual environment."""
+    candidates = [os.environ.get("KIZURIUM_BERGAMOT_PYTHON", ""),
+                  str(Path(sys.base_prefix) / "bin/python3"), "/usr/bin/python3"]
+    for directory in (Path("/usr/bin"), Path("/usr/local/bin")):
+        candidates.extend(str(p) for p in sorted(directory.glob("python3.*"))
+                          if re.fullmatch(r"python3\.\d+", p.name))
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        try:
+            identity = str(path.resolve())
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if _probe_python(str(path), path.stat().st_mtime_ns):
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def refresh_runtime():
+    """Called by settings workers after an external installation or repair."""
+    _probe_python.cache_clear()
+    return runtime_kind()
 
 
 def runtime_kind():
     """"in-process", "helper" or "" — where Bergamot would run."""
     if in_process_available():
         return "in-process"
-    return "helper" if helper_python() else ""
+    if helper_python():
+        return "helper"
+    return "system" if system_python() else ""
 
 
 def runtime_available():
@@ -93,7 +144,7 @@ class HelperRuntime:
 
     TIMEOUT = 60.0
 
-    def __init__(self, directory):
+    def __init__(self, directory, python=None):
         import subprocess
 
         self._lock = threading.Lock()
@@ -102,7 +153,7 @@ class HelperRuntime:
         # shadow the real binding on sys.path.
         worker = Path(__file__).with_name("bergamot_worker.py")
         self._proc = subprocess.Popen(
-            [str(helper_python()), "-I", str(worker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            [str(python or helper_python()), "-I", str(worker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1,
             start_new_session=True)
         try:
@@ -263,8 +314,8 @@ def load_runtime(root, source, target):
     kind = runtime_kind()
     if not kind:
         raise ProviderError("incompatible", detail=RUNTIME_MISSING)
-    if kind == "helper":
-        return HelperRuntime(root)
+    if kind in {"helper", "system"}:
+        return HelperRuntime(root, system_python() if kind == "system" else helper_python())
     try:
         import bergamot
         import yaml

@@ -41,7 +41,7 @@ from ..ocr import engine
 from ..ocr.engine import (  # noqa: F401
     _OCR_LOCK,
     CORE_REREAD_BELOW,
-    DET_SIDE_LEN,
+    det_side_len,
     OCR_THREADS,
     _rapid_rows,
     is_garbage_ocr,
@@ -155,6 +155,12 @@ def rapid_ocr_lines(region_img: Image.Image, max_side: int = 1280) -> list[dict]
     if not engine_enabled("rapid"):
         return []
     try:
+        side = det_side_len()
+        if engine.RAPID_OCR is not None and engine.RAPID_DET_SIDE != side:
+            # The detector limit is fixed when the engine is built: rebuild it for a
+            # new setting, never while a recognition is running.
+            with _OCR_LOCK:
+                engine.RAPID_OCR = None
         if engine.RAPID_OCR is None:
             import os as _os
 
@@ -180,11 +186,12 @@ def rapid_ocr_lines(region_img: Image.Image, max_side: int = 1280) -> list[dict]
                     # upscales a wide region before detection: measured 957 ms
                     # against 432 ms for a 640 px long side, with fewer lines
                     # missed rather than more.
-                    "Det.limit_side_len": DET_SIDE_LEN,
+                    "Det.limit_side_len": side,
                     "Det.limit_type": "max",
                 }
             )
-            tlog(f"rapidocr=ready threads={OCR_THREADS}")
+            engine.RAPID_DET_SIDE = side
+            tlog(f"rapidocr=ready threads={OCR_THREADS} det_side={side}")
     except Exception as exc:
         engine.RAPID_INIT_FAILED = True
         tlog(f"rapidocr=unavailable {type(exc).__name__}: {exc}")

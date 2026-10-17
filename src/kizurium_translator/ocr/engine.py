@@ -104,7 +104,34 @@ OCR_THREADS = budget().ocr
 _OCR_LOCK = threading.Lock()
 
 
-DET_SIDE_LEN = 640
+DET_SIDE_LEN = 640  # the "fast" setting; kept for callers that import it
+DET_SIDE_AUTO = 1280
+
+# The side RapidOCR's detector is built with. 0 until the first engine exists.
+RAPID_DET_SIDE = 0
+
+
+def det_side_len() -> int:
+    """Longest side, in pixels, the text detector sees: ``ocr.options.det_side_len``.
+
+    ``"auto"`` (default) is 1280, ``"fast"`` is 640, or an explicit pixel count.
+
+    The detector shrinks anything larger than this before looking for text. At 640 a
+    1080p frame is reduced threefold and 20 px interface text becomes 7 px: measured on
+    the 16 test frames, raw word recall was 67% at 640 and 80% at 1280, and the
+    reconstructed paragraphs went from 57.6% to 72.3% word recall. The price is
+    detection time on large regions (about 2x on a full 1920x1080 frame), which does
+    not apply to regions already smaller than the limit.
+    """
+    from ..core.active import current
+
+    raw = current().ocr_options.get("det_side_len", "auto")
+    if str(raw).lower() == "fast":
+        return DET_SIDE_LEN
+    try:
+        return max(320, min(2560, int(raw)))
+    except (TypeError, ValueError):
+        return DET_SIDE_AUTO
 
 
 def ocr_lines(data: dict) -> list[dict]:
@@ -1143,7 +1170,9 @@ def is_overlay_echo_ocr(text: str) -> bool:
             short = sum(
                 1 for w in btoks if len(re.sub(r"[^A-Za-zА-Яа-яЁё]", "", w)) <= 2
             )
-            if short / len(btoks) >= 0.35:
+            # English dialogue naturally contains many short words (I, in,
+            # the, to). That alone cannot establish that it is overlay noise.
+            if short / len(btoks) >= 0.35 and _real_english_words(body) < 3:
                 return True
         bcomp = re.sub(r"[^A-Za-zА-Яа-яЁё]", "", body)
         if len(bcomp) >= 10:
