@@ -143,7 +143,7 @@ kizurium-translator --toggle
 Start Live Translation for a region:
 
 ```bash
-kizurium-translator --live -g 0,0 1920x1080
+kizurium-translator --live "0,0 1920x1080"
 ```
 
 ---
@@ -153,7 +153,7 @@ kizurium-translator --live -g 0,0 1920x1080
 | Command | What it does |
 |---|---|
 | `--toggle` | pick a region with the mouse and start translation |
-| `--live -g 0,0 1920x1080` | live translation of the specified region |
+| `--live "0,0 1920x1080"` | live translation of the specified region |
 | `--ocr-copy` | recognize a region and copy the text to the clipboard |
 | `--text` | open the text translator |
 | `--stop` | stop the current session |
@@ -162,6 +162,8 @@ kizurium-translator --live -g 0,0 1920x1080
 | `--profile ID` | enable a game profile |
 | `--offline-only` | disable network backends |
 | `--pack-install ID` | install an offline pack |
+| `--packs` | list offline packs and their state |
+| `--model-status` | OCR engines, Bergamot runtime and models, offline packs |
 
 ---
 
@@ -190,7 +192,6 @@ tesseract-data-rus
 
 grim
 slurp
-quickshell
 wl-clipboard
 aria2
 libnotify
@@ -206,7 +207,7 @@ Kizurium does not use telemetry and does not contain built-in API keys.
 
 **Screen captures are not sent over the network by the application itself.**
 
-When a network translation backend is selected, only the text being translated is sent to that backend.
+By default the network backend is Google gtx (`provider = "google"`), so the text of recognized lines is sent there unless `--offline-only` is set. Only text is sent, never screenshots. There is no built-in telemetry, but anonymity is not guaranteed: the service sees your IP address and the request text. The full list of network requests is in `trust.md`.
 
 More details:
 

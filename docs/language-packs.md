@@ -19,8 +19,11 @@ Kizurium умеет переводить без сетевого backend, есл
 Можно сразу включить офлайн-паки без дополнительных вопросов:
 
 ```bash
-./install.sh --system --offline-packs
+./install.sh --user --yes --offline-packs
 ```
+
+Флаг `--offline-packs` требует режима `--user`. В Arch-режиме (`./install.sh` без
+`--user`) паки ставятся командой `--pack-install` после установки.
 
 Паки можно поставить и позже:
 
@@ -59,7 +62,7 @@ models/opus-mt-ja-ru/
 
 Первый набор локальных моделей использует **pair-specific OPUS-MT** для конкретных направлений перевода.
 
-Например:
+Сейчас в каталоге два пака:
 
 ```text
 opus-mt-en-ru
@@ -208,6 +211,33 @@ kizurium-translator \
 Здесь `/path/to/ct2-model` — уже готовый каталог CTranslate2.
 
 Kizurium не требует от вас самостоятельно выполнять конвертацию OPUS-MT → CT2, если используется официальный каталог паков.
+
+---
+
+## Bergamot
+
+Bergamot — второй локальный движок. Его runtime и модели устанавливаются отдельно
+от CT2-паков и не входят в `--pack-install`.
+
+```bash
+kizurium-translator --model-status                  # состояние runtime, моделей и паков
+kizurium-translator --bergamot-runtime-install      # собственный Python 3.10 и wheel bergamot (нужны uv и сеть)
+kizurium-translator --bergamot-install en-ru        # модель из репозитория Mozilla, проверка sha256
+kizurium-translator --bergamot-remove en-ru         # удалить модель из кэша Kizurium
+kizurium-translator --bergamot-runtime-remove       # удалить окружение runtime, модели остаются
+```
+
+Чтобы использовать Bergamot как провайдер:
+
+```toml
+[translation]
+provider = "bergamot"
+```
+
+Файлы моделей Firefox команды не трогают. Если Bergamot выбран, а runtime или модель
+не установлены, строка не переводится; онлайн-провайдер вместо него не подставляется.
+
+Полный список сетевых загрузок: [`trust.md`](trust.md).
 
 ---
 

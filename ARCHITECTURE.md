@@ -1,10 +1,9 @@
 # Kizurium architecture
 
-Source-inspected baseline: 2026-10-18, working tree `/home/art/DEV/k`.
-This document distinguishes existing behavior from planned changes. The reference
-checkout `/home/art/DEV/kizurium` is read-only. Previously reported MAE/SSIM,
-word completeness/precision and OCR timing figures are historical reports, not
-benchmarks independently reproduced for this work.
+Baseline: the source tree at version 1.3.0, inspected 2026-10-18.
+This document describes the code as it is. Earlier MAE/SSIM, word
+completeness/precision and OCR timing figures are historical reports and are not
+reproduced here; the only measurements below are synthetic helper microbenchmarks.
 
 ## 1. Responsibilities and actual technology
 
@@ -19,16 +18,14 @@ overlay target. `capture.py` retains pre-existing KDE ScreenShot2 and XDG
 ScreenCast/PipeWire paths; these are optional runtime branches, not a reason to
 add KWin-specific dependencies. Other capture paths use grim and slurp.
 
-**Repository discrepancy:** this checkout's selector is already
-`gtk_selector.py`, launched by `selector.py`. Quickshell/QML selector files were
-removed by earlier work. Quickshell still has stale comments in source/build metadata and is actively
-listed by flake.nix, but no active QML application layer is called by this
-checkout. Packaging declarations should not be confused with runtime ownership.
-No Qt/PySide runtime will be introduced by this task. Reintroducing a second
-selector would duplicate the current protocol and lifecycle.
+**Selector:** the region selector is `gtk_selector.py`, launched by `selector.py`
+as a child GTK layer-shell process. No QML or Quickshell code runs in this tree.
+`flake.nix` still lists the `quickshell` package, which is a packaging leftover and
+not a runtime dependency. Packaging declarations should not be confused with runtime
+ownership. A second selector would duplicate the current protocol and lifecycle.
 
-**Python baseline:** project metadata currently permits Python >=3.11; the
-available application and system interpreter is 3.14.8. Python 3.15+ is a forward
+**Python baseline:** project metadata permits Python >=3.11; the reference
+interpreter for the measurements below is 3.14.8. Python 3.15+ is a forward
 compatibility target, not a verified installed runtime. Native build support
 must be checked against upstream PyO3 before claiming that target is supported.
 Pillow, numpy, pytesseract and requests are Python dependencies. OCR integrations
@@ -169,9 +166,9 @@ is initialized before showing overlay windows; click-through is implemented by
 empty input regions and no keyboard interactivity. Pango/Cairo rendering stays
 in Python orchestration; the settings/main-window modernization will use themed
 widgets and scoped CSS without changing card rendering, typography or capture
-paint barriers. Quickshell has no rendering responsibility in this checkout.
+paint barriers. Quickshell has no rendering responsibility.
 
-## 7. Performance assessment and proposed native boundary
+## 7. Performance assessment and native boundary
 
 Full runtime profiling has not been completed. Existing cycle statistics measure
 capture/OCR/translation/layout; they do not prove which Python loop dominates an
@@ -189,8 +186,8 @@ entire session. Known source-level costs suitable for isolated measurement:
   Pango calls themselves are already native. ONNX, Tesseract, CTranslate2,
   Bergamot, Pillow, numpy, Cairo, Pango and SQLite already execute native code.
 
-**Decision:** start with one optional native extension and one isolated
-statistics kernel, subject to cost measurement and exact semantic checks.
+**Decision (implemented in 0.1 and 0.2):** one optional native extension with
+isolated statistics kernels, subject to cost measurement and exact semantic checks.
 No recognition heuristic, threshold, model or provider implementation moves.
 A package-local Python adapter retains the existing call signatures and fallback.
 The FFI accepts immutable contiguous byte buffers plus validated dimensions,
@@ -262,8 +259,8 @@ Upstream [PyO3 0.30.1 changelog](https://docs.rs/crate/pyo3/0.30.1/source/CHANGE
 includes Python 3.15 final support and requires Rust >=1.85. The available Rust
 compiler is 1.99.1. [maturin configuration](https://www.maturin.rs/config) supports
 an independently packaged PyO3 companion wheel; the application retains hatchling.
-Local native compilation/import results are recorded below, and must not be
-interpreted as verification of GTK/OCR dependency support on Python 3.15.
+Native compilation and import results are recorded below. They do not verify
+GTK or OCR dependency support on Python 3.15.
 
 
 ## 10. Initial native boundary and build (0.1)
@@ -401,6 +398,6 @@ Measured median helper time on Python 3.14.8 / x86_64, release Rust 1.99.1,
 | Outside-change features, unchanged frame | 0.061 ms | 0.057 ms | approximately equal |
 | Ink height, 700×40 text-like crop | 1.284 ms | 0.053 ms | 24.0× |
 
-Raw timings, environment and baseline profile are in
-`test-results/native-pixels-2026-10-18.json`. These are synthetic helper
-measurements, not an end-to-end OCR quality, live latency or translation benchmark.
+Raw timing output is not committed. Correctness is checked by
+`scripts/check_native_pixels.py`. These are synthetic helper measurements, not an
+end-to-end OCR quality, live latency or translation benchmark.
