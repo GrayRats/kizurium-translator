@@ -254,6 +254,7 @@ Without a profile, Kizurium stays in general-purpose mode.
 | Document | Contents |
 |---|---|
 | [`docs/install.md`](docs/install.md) | installation, setup, and hotkeys |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | architecture, data flow, and the Python/native boundary |
 | [`docs/trust.md`](docs/trust.md) | privacy and network requests |
 | [`docs/layout-families.md`](docs/layout-families.md) | distinguishing dialogue lines from buttons and other UI text |
 | [`docs/external-dictionaries.md`](docs/external-dictionaries.md) | external dictionary formats |

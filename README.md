@@ -250,6 +250,7 @@ kizurium-translator --import-dictionary ~/my-dict.tsv
 | Документ | Содержание |
 |---|---|
 | [`docs/install.md`](docs/install.md) | установка, запуск и горячие клавиши |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | архитектура, потоки данных, граница Python и native-кода |
 | [`docs/trust.md`](docs/trust.md) | приватность и сетевые запросы |
 | [`docs/layout-families.md`](docs/layout-families.md) | определение структуры текста и реплик |
 | [`docs/external-dictionaries.md`](docs/external-dictionaries.md) | форматы внешних словарей |
