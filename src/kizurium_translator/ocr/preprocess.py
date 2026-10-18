@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageOps, ImageStat
 
+from ..native import ink_row_span
+
 TINY_INK_THRESHOLD = 10
 
 
@@ -35,6 +37,9 @@ def estimate_ink_height(img: Image.Image) -> float:
     w, h = gray.size
     if w * h == 0:
         return 0.0
+    span = ink_row_span(gray, cutoff)
+    if span is not None:
+        return float(span)
     pix = gray.load()
     rows_with_ink: list[int] = []
     for y in range(h):

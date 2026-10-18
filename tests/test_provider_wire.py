@@ -207,3 +207,57 @@ class TestScheduler:
         with pytest.raises(Cancelled):
             self.run(sched, ("fp", "t"), lambda: calls.append(1), cancelled=lambda: True)
         assert calls == []
+
+    def test_cancelled_frame_keeps_the_servers_pause(self):
+        from kizurium_translator.translation.scheduler import Cancelled
+
+        sched = Scheduler()
+        cancelled = False
+
+        def op():
+            nonlocal cancelled
+            cancelled = True
+            raise ProviderError("rate_limit", 429, retry_after=300)
+
+        with pytest.raises(Cancelled):
+            self.run(sched, ("fp", "old-frame"), op, cancelled=lambda: cancelled)
+        with pytest.raises(ProviderError) as err:
+            self.run(sched, ("fp", "new-frame"), lambda: pytest.fail("must stay offline"))
+        assert err.value.category == "rate_limit"
+
+    def test_long_retry_after_is_not_shortened_to_the_wait_budget(self, monkeypatch):
+        sched = Scheduler()
+        now = time.monotonic()
+        monkeypatch.setattr(time, "monotonic", lambda: now)
+        with pytest.raises(ProviderError):
+            self.run(sched, ("fp", "t"), lambda: (_ for _ in ()).throw(
+                ProviderError("rate_limit", 429, retry_after=86400)))
+        now += 121
+        with pytest.raises(ProviderError):
+            self.run(sched, ("fp", "new"), lambda: pytest.fail("server asked for a day"))
+
+    def test_success_from_obsolete_frame_can_be_reused(self):
+        from kizurium_translator.translation.scheduler import Cancelled
+
+        sched = Scheduler()
+        cancelled = False
+
+        def op():
+            nonlocal cancelled
+            cancelled = True
+            return "translation"
+
+        with pytest.raises(Cancelled):
+            self.run(sched, ("fp", "same-text"), op, cancelled=lambda: cancelled)
+        assert self.run(sched, ("fp", "same-text"), lambda: pytest.fail("duplicate request")) == "translation"
+
+    def test_repeated_limits_increase_pacing_across_frames(self, monkeypatch):
+        sched = Scheduler()
+        now = time.monotonic()
+        monkeypatch.setattr(time, "monotonic", lambda: now)
+        for expected_interval in (3.6, 7.2):
+            with pytest.raises(ProviderError):
+                sched.run_provider("p", ("fp", str(now)), lambda: (_ for _ in ()).throw(
+                    ProviderError("rate_limit", 429, retry_after=0)), retries=0, interval=1.8)
+            assert sched._providers["p"].minimum_interval == expected_interval
+            now += 10

@@ -1,22 +1,32 @@
-# Optional native tile helper
+# Native pixel analysis kernels
 
-This separate maturin package exposes `kizurium_native.tile_reductions`.
-The main application remains a Python/hatchling package and runs without it.
-See the repository architecture document for installation and phase boundaries.
+This separate maturin/PyO3 package exposes three kernels. The main application
+remains a Python/hatchling package and runs without it. Arch packages include
+the native wheel; `install.sh --user` builds it when Cargo is available.
 
-The only kernel reduces already computed grayscale pixel differences into
-row-major `(mean, fraction_over_threshold)` tiles. Python retains all thresholds,
-change classification, masking, geometry, tracking, OCR and translation.
-`KIZURIUM_NATIVE=0` selects the existing Python implementation at runtime.
-Unsupported image modes and absent NumPy also retain that implementation.
+- `tile_reductions`: row-major `(mean, fraction_over_threshold)` tiles.
+- `outside_change_features`: local 3×3 contrast, four-neighbor connected components,
+  edge density and dirty tile count for a supplied change mask.
+- `ink_row_span`: first-to-last row containing a pixel below a supplied threshold.
 
-Pillow creates one immutable `bytes` buffer. PyO3 borrows that buffer while the
-kernel runs with `Python::detach`; the Python argument owns it throughout the
-call. Rust retains no Python objects, uses no unsafe code, and returns owned
-primitive values. Dimension/buffer checks precede detached work. The threshold
-rounds to float32 to match NumPy's comparison against a Python scalar.
+Python retains thresholds, change classification, masks, geometry, tracking,
+upscale decisions, OCR and translation. `KIZURIUM_NATIVE=0` selects the existing
+Python implementation at runtime. Unsupported image modes, absent symbols in an
+older companion wheel, or unavailable imports also retain that implementation.
+NumPy-less tile behavior remains in Python; ink span does not require NumPy.
 
-`python scripts/check_native_tiles.py` checks isolated synthetic parity and
-measures the production helper bodies including Python dispatch, result
-conversion and `Image.tobytes()`. Its timings describe these helpers only.
-The kernel never invokes OCR, captures a display or changes recognition rules.
+`lib.rs` owns the Python boundary; `image.rs` validates shared grayscale views;
+`tiles.rs`, `change.rs` and `ink.rs` contain pure Rust computation. Immutable
+Python byte arguments own the borrowed buffers throughout `Python::detach`.
+Rust retains no Python objects, forbids unsafe code, and returns owned primitive
+values. Dimensions and buffers are checked before work. Contrast neighborhoods
+wrap like NumPy roll; component neighbors do not wrap. Comparisons retain the
+Python implementation's strict thresholds and float32 rounding where applicable.
+
+Build with `maturin build --release --locked --manifest-path native/Cargo.toml`
+and install the resulting wheel into the application's Python environment.
+`cargo test --locked --manifest-path native/Cargo.toml` tests pure kernels.
+`scripts/check_native_tiles.py` and `scripts/check_native_pixels.py` check
+synthetic parity and time production helper bodies including dispatch, copies
+and result conversion. The latter also profiles the Python reference. Neither
+script captures a display or invokes OCR. Timings describe these helpers only.

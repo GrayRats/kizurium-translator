@@ -25,7 +25,7 @@ from PIL import Image, ImageChops, ImageStat
 from ..core.models import (  # noqa: F401
     boxes_overlap,
 )
-from ..native import tile_reductions
+from ..native import outside_change_features, tile_reductions
 from .runtime import (  # noqa: F401
     SETTINGS,
 )
@@ -715,6 +715,20 @@ def measure_outside_change(
     if int(outside.sum()) == 0:
         return ChangeFeatures(
             changed_area=area,
+            temporal_persistence=temporal_persistence,
+        )
+
+    features = outside_change_features(
+        probe_b, outside, edge_span=CHANGE_EDGE_SPAN, tile_size=PROBE_TILE_SIZE
+    )
+    if features is not None:
+        tiles, components, mean_size, density = features
+        return ChangeFeatures(
+            changed_area=area,
+            changed_tile_count=tiles,
+            component_count=components,
+            mean_component_size=mean_size,
+            edge_density=density,
             temporal_persistence=temporal_persistence,
         )
 

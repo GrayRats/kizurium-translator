@@ -4,9 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "kizurium-native"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11"
-description = "Optional tile reduction helper for Kizurium Translator"
+description = "Optional pixel analysis kernels for Kizurium Translator"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 
