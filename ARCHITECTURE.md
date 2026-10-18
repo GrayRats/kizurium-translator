@@ -266,9 +266,9 @@ Local native compilation/import results are recorded below, and must not be
 interpreted as verification of GTK/OCR dependency support on Python 3.15.
 
 
-## 10. Implemented native boundary and build
+## 10. Initial native boundary and build (0.1)
 
-Only tile statistics have migrated. `native/` is one optional maturin/PyO3
+In the first phase only tile statistics migrated. `native/` was one optional maturin/PyO3
 package, version 0.1.0; `native/src/lib.rs` exports
 `kizurium_native.tile_reductions(bytes, width, height, tile_size, threshold)`.
 The project adapter `kizurium_translator/native.py` returns row-major
@@ -293,8 +293,8 @@ and an available numpy installation. Other inputs and absent/incompatible
 extensions use the original Python code. Import/ABI failures are caught; an
 available kernel's runtime errors are deliberately visible. Set
 `KIZURIUM_NATIVE=0` to force the established Python implementation, including its
-numpy-less mean-based fraction fallback. There are no required Rust dependencies
-for normal application installation.
+numpy-less mean-based fraction fallback. The Python wheel itself does not require
+a Rust compiler. See section 11 for the later Arch packaging integration.
 
 Build/install the optional companion into the same environment as Kizurium:
 
@@ -342,3 +342,65 @@ portal accepts an empty parent handle. Preflight stays on the controller worker
 pool and repeated starts remain idempotent. Nine isolated regression checks cover
 activation, explicit show, successful/failed preflight and duplicate starts; they
 do not invoke a real compositor or OCR engine.
+
+## 11. Rust pixel analysis (0.2)
+
+This phase extends the existing boundary after measuring production helper
+bodies on deterministic synthetic data. A 320×180 noise probe took about 48 ms
+in `measure_outside_change`; profiling attributed most time to the Python
+connected-component walk and its repeated stack operations. OCR libraries,
+translation transports, GTK and rendering are still owned by their existing
+layers.
+
+The native crate is now separated by responsibility:
+
+| Module | Responsibility |
+|---|---|
+| `lib.rs` | PyO3 signatures, buffer validation, detachment and primitive results |
+| `image.rs` | Validated immutable grayscale views with checked dimensions |
+| `tiles.rs` | Existing row-major tile statistics, with preallocated results |
+| `change.rs` | Contrast, connected components, edge density, changed tile count |
+| `ink.rs` | Vertical span of dark ink rows |
+
+`measure_outside_change` retains NumPy frame differences, area thresholds and
+masking in Python. Only the already masked bool buffer and current L image cross
+the native boundary. Contrast preserves NumPy roll's wraparound; four-connected
+components deliberately do not wrap. Each component pixel is marked when pushed,
+so the Rust stack visits it once rather than repeatedly admitting neighbors.
+Python constructs the same `ChangeFeatures` and applies the same classifier.
+For ink height, grayscale conversion, adaptive cutoff and upscale selection
+remain in Python; Rust scans for the first and last matching rows. No OCR model,
+recognition threshold or translation provider has changed.
+
+Both inputs are immutable bytes whose owners remain alive during the detached
+call. Kernels contain no Python callbacks, threads, global state or unsafe code.
+Each exported symbol is probed independently, so a 0.1 companion still supplies
+tile reductions while new calls fall back. Unsupported image/array formats,
+missing NumPy and `KIZURIUM_NATIVE=0` preserve the existing paths; runtime errors
+from an available kernel remain visible.
+
+The Arch `PKGBUILD` builds both wheels, fetching pinned Cargo dependencies in
+`prepare()` and building the native wheel offline in release mode. Pacman owns
+the extension alongside the application. `install.sh --user` optionally builds
+the companion when Cargo is available; the Python package remains independently
+installable. The current Nix derivation retains Python fallbacks.
+
+`scripts/check_native_pixels.py` checks 459 cases including masks, scaled boxes,
+empty/unchanged content, one-pixel dimensions, wraparound, float32 boundaries,
+NaN and grayscale/RGB ink. Separate boundary tests reject malformed/mutable
+buffers. The existing tile script checks another 192 cases. Rust unit tests and
+Clippy cover the pure modules; targeted Python regressions run with acceleration
+enabled and disabled. Font-dependent tests may skip if fixture fonts are absent.
+
+Measured median helper time on Python 3.14.8 / x86_64, release Rust 1.99.1,
+15 samples after three warmups (including byte copies and result conversion):
+
+| Helper / fixture | Python | Rust | Ratio |
+|---|---:|---:|---:|
+| Outside-change features, 320×180 noise | 48.419 ms | 0.945 ms | 51.2× |
+| Outside-change features, unchanged frame | 0.061 ms | 0.057 ms | approximately equal |
+| Ink height, 700×40 text-like crop | 1.284 ms | 0.053 ms | 24.0× |
+
+Raw timings, environment and baseline profile are in
+`test-results/native-pixels-2026-10-18.json`. These are synthetic helper
+measurements, not an end-to-end OCR quality, live latency or translation benchmark.

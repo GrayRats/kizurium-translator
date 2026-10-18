@@ -1,0 +1,52 @@
+{
+  "synthetic_only": true,
+  "parity_cases": 459,
+  "timings": {
+    "python": {
+      "outside_noise": {
+        "median_ms": 48.418838,
+        "min_ms": 47.36945
+      },
+      "outside_unchanged": {
+        "median_ms": 0.060815,
+        "min_ms": 0.056237
+      },
+      "ink_height": {
+        "median_ms": 1.283771,
+        "min_ms": 1.270096
+      }
+    },
+    "rust": {
+      "outside_noise": {
+        "median_ms": 0.94519,
+        "min_ms": 0.923128
+      },
+      "outside_unchanged": {
+        "median_ms": 0.057278,
+        "min_ms": 0.055666
+      },
+      "ink_height": {
+        "median_ms": 0.053411,
+        "min_ms": 0.051859
+      }
+    }
+  },
+  "baseline_profile": "         376428 function calls in 0.111 seconds\n\n   Ordered by: cumulative time\n   List reduced from 61 to 8 due to restriction <8>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.082    0.082    0.111    0.111 /home/art/DEV/k/src/kizurium_translator/live/change.py:676(measure_outside_change)\n   187439    0.014    0.000    0.014    0.000 {method 'append' of 'list' objects}\n   187437    0.014    0.000    0.014    0.000 {method 'pop' of 'list' objects}\n       18    0.000    0.000    0.000    0.000 /usr/lib/python3.14/site-packages/numpy/_core/numeric.py:1226(roll)\n      240    0.000    0.000    0.000    0.000 {method 'any' of 'numpy.ndarray' objects}\n      244    0.000    0.000    0.000    0.000 {method 'reduce' of 'numpy.ufunc' objects}\n      240    0.000    0.000    0.000    0.000 /usr/lib/python3.14/site-packages/numpy/_core/_methods.py:55(_any)\n        3    0.000    0.000    0.000    0.000 /usr/lib/python3.14/site-packages/numpy/_core/_methods.py:115(_mean)\n\n\n",
+  "environment": {
+    "python": "3.14.8",
+    "machine": "x86_64",
+    "rust": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "profile": "release",
+    "seed": 27,
+    "warmups": 3,
+    "samples": 15,
+    "change_probe": [
+      320,
+      180
+    ],
+    "ink_crop": [
+      700,
+      40
+    ]
+  }
+}

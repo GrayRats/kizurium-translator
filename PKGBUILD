@@ -8,7 +8,7 @@
 #   git pull && makepkg -su
 
 pkgname=kizurium-translator
-pkgver=1.2.0
+pkgver=1.3.0
 pkgrel=1
 pkgdesc="Wayland-native screen translator and OCR tool for Linux with live translation overlays"
 arch=('x86_64' 'aarch64')
@@ -117,7 +117,12 @@ optdepends=(
   'tesseract-data-rus: Russian OCR'
 )
 
-makedepends=('python-build' 'python-installer' 'python-hatchling')
+makedepends=('python-build' 'python-installer' 'python-hatchling' 'rust' 'maturin')
+
+prepare() {
+    # Pin Cargo dependencies before the offline release build.
+    cargo fetch --locked --manifest-path "$_tree/native/Cargo.toml"
+}
 
 
 # --no-isolation: hatchling must already be there, which makedepends guarantees.
@@ -126,6 +131,10 @@ build() {
     cd "$_tree"
     rm -rf dist
     python -m build --wheel --no-isolation
+    rm -rf "$srcdir/native-wheels"
+    maturin build --release --locked --offline \
+        --manifest-path native/Cargo.toml --interpreter /usr/bin/python \
+        --out "$srcdir/native-wheels"
 }
 
 package() {
@@ -134,6 +143,7 @@ package() {
     # [project.scripts]. Nothing overwrites it, so the wheel's RECORD describes
     # the file that is actually there.
     python -m installer --destdir="$pkgdir" dist/*.whl
+    python -m installer --destdir="$pkgdir" "$srcdir/native-wheels/"*.whl
     python -m installer --destdir="$pkgdir" \
         "$srcdir/rapidocr-$_rapid_ver-py3-none-any.whl"
     vendor_dir="$pkgdir/usr/lib/python$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')/site-packages/kizurium_translator/_vendor"

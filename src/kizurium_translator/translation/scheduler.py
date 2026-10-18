@@ -184,6 +184,16 @@ class Scheduler:
         """Не больше одного одновременного запроса к gtx."""
         return self._gtx
 
+    def cooldown_remaining(self, provider):
+        import time
+
+        with self._lock:
+            lane = self._providers.get(provider)
+        if lane is None:
+            return 0.0
+        with lane.condition:
+            return max(0.0, lane.cooldown_until - time.monotonic())
+
     def run_provider(self, provider, key, operation, *, cancelled=lambda: False,
                       interval=1.8, debounce=0.0, status=lambda *_: None, retries=4,
                       cooldown=25.0):
@@ -236,13 +246,17 @@ class Scheduler:
             for attempt in range(retries + 1):
                 wait_until(lane.next_start)
                 check()
-                lane.next_start = time.monotonic() + max(0, interval)
+                lane.next_start = time.monotonic() + max(0, interval, lane.minimum_interval)
                 try:
                     result = operation()
-                    check()
                     with lane.condition:
                         lane.results[key] = result
                         lane.cooldown_error = None
+                        lane.rate_failures = 0
+                        lane.minimum_interval *= 0.9
+                    # Keep a valid response even if its frame became obsolete.
+                    # The next frame may contain exactly the same text.
+                    check()
                     return result
                 except Cancelled:
                     raise
@@ -257,12 +271,24 @@ class Scheduler:
                             "network" if isinstance(exc, requests.ConnectionError) else "initialization")
                         error = ProviderError(category)
                     delay = error.retry_after
-                    if delay is not None and delay > MAX_RETRY_AFTER_S:
+                    long_pause = delay is not None and delay > MAX_RETRY_AFTER_S
+                    if long_pause:
                         # The server asks for a longer pause than is sane to sit
                         # through: report it instead of blocking the lane.
-                        attempt, delay = retries, MAX_RETRY_AFTER_S
+                        attempt = retries
                     if delay is None:
                         delay = min(60.0, 2.0 * 2 ** attempt * random.uniform(1.0, 1.25))
+                        if error.category == "rate_limit":
+                            delay = min(MAX_RETRY_AFTER_S,
+                                        max(0, cooldown) * 2 ** min(lane.rate_failures, 6))
+                    if error.category == "rate_limit":
+                        lane.rate_failures += 1
+                        lane.minimum_interval = min(30.0, 2 * max(interval, lane.minimum_interval))
+                        # Publish before checking cancellation: a new OCR frame
+                        # must inherit the server's pause, including a long one.
+                        with lane.condition:
+                            lane.cooldown_until = time.monotonic() + delay
+                            lane.cooldown_error = error
                     if error.retryable:
                         lane.next_start = max(lane.next_start, time.monotonic() + delay)
                     check()
@@ -274,8 +300,9 @@ class Scheduler:
                             if not error.retryable:
                                 lane.results[key] = error
                             else:
-                                pause = min(MAX_RETRY_AFTER_S, error.retry_after or cooldown)
-                                lane.cooldown_until = time.monotonic() + pause
+                                pause = error.retry_after if error.retry_after is not None else cooldown
+                                lane.cooldown_until = max(lane.cooldown_until,
+                                                          time.monotonic() + pause)
                                 lane.cooldown_error = error
                             if error.category in {"authentication", "authentication_or_quota", "quota"}:
                                 lane.disabled[key[0]] = error
@@ -335,4 +362,5 @@ class ProviderQueue:
         self.cooldown_until = 0.0
         self.cooldown_error = None
         self.disabled = {}
-
+        self.rate_failures = 0
+        self.minimum_interval = 0.0

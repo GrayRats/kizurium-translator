@@ -1,9 +1,9 @@
 [package]
 name = "kizurium-native"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-description = "Optional grayscale tile reductions for Kizurium Translator"
+description = "Optional pixel analysis kernels for Kizurium Translator"
 
 [lib]
 name = "kizurium_native"

@@ -923,7 +923,6 @@ class Translator:
         self._log = log or (lambda _msg: None)
         self._session_factory = None if self.offline_only else session_factory
         self._session = None
-        self._cooldown_until = 0.0  # monotonic: immune to clock changes
         self._cache = _Cache(
             cache_path,
             cache_max_entries,
@@ -1021,7 +1020,7 @@ class Translator:
     def _status(self, category, attempt=0):
         labels = {
             "waiting": "Waiting for translation",
-            "rate_limit": "Rate limit exceeded",
+            "rate_limit": "Сервис ограничил запросы. Дождитесь окончания паузы",
             "retrying": "Retrying translation",
             "unavailable": "Translation service unavailable",
             "network": "Translation service unavailable",
@@ -1033,6 +1032,14 @@ class Translator:
             "ready": "Ready",
         }
         self.status = labels.get(category, "Translation failed: " + category)
+        if category == "rate_limit":
+            import math
+
+            from .translation.scheduler import SCHEDULER
+
+            seconds = math.ceil(SCHEDULER.cooldown_remaining(self.provider_id))
+            if seconds:
+                self.status += f" (~{seconds} с)"
         self._log_msg(f"provider={self.provider_id} operation=translate category={category} attempt={attempt}")
         if self.status_callback:
             self.status_callback(self.status)
@@ -1081,6 +1088,7 @@ class Translator:
                 self.provider_id, key, operation, cancelled=cancel,
                 interval=self.request_interval if provider.requires_network else 0,
                 debounce=self.ocr_debounce, status=self._status,
+                retries=1 if self.provider_id == "google" else 4,
                 cooldown=self.cooldown_s)
             self._status("ready")
             return got
@@ -1151,8 +1159,9 @@ class Translator:
 
     def gtx_cooling(self) -> bool:
         """True while gtx is backing off after a 429."""
-        with self._lock:
-            return time.monotonic() < self._cooldown_until
+        from .translation.scheduler import SCHEDULER
+
+        return SCHEDULER.cooldown_remaining("google") > 0
 
     def _slow_translate(self, text: str, source: str) -> str:
         """Медленные бэкенды: MyMemory и (если Google не в бане) deep-translator."""

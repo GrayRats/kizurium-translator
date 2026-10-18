@@ -12,6 +12,8 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kizurium-translator"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/kizurium-translator"
 VENV_DIR="$STATE_DIR/venv"
 EXTRAS=""
+INSTALL_MODE=package
+PREFIX_SET=0
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -299,7 +301,9 @@ Usage: ./install.sh          # interactive — recommended
        ./install.sh --uninstall
 
 Options (optional; most people never need them):
-  --yes / -y          non-interactive: system pkgs + RapidOCR + Meiki (JP games)
+  --user              legacy per-user venv install (no pacman registration);
+                      use this for Meiki, PaddleOCR or Python extras
+  --yes / -y          non-interactive: system pkgs + RapidOCR
   --extras "a b"      rapid | meiki | deep-translate | local-mt | all
   --offline-packs     also download en→ru / ja→ru CT2 models (~160 MB)
   --no-offline-packs  skip offline models (default in express / --yes)
@@ -307,11 +311,11 @@ Options (optional; most people never need them):
                       verified repository (+ native binding when a wheel exists)
   --no-bergamot       skip Bergamot
   --paddle            also install PaddleOCR (heavy; models are set up in Settings)
-  --update            re-run with the choices saved by the last install: sync the
-                      package, refresh the shortcut, re-verify and repair models
-  --meiki             include Meiki OCR (default in express / --yes)
+  --update            rebuild/reinstall the Arch package; with --user, restore
+                      saved choices and repair the Python environment/models
+  --meiki             include Meiki OCR (requires --user)
   --no-meiki          skip Japanese Meiki OCR
-  --prefix DIR        command install prefix (default: $PREFIX)
+  --prefix DIR        user command install prefix (requires --user; default: $PREFIX)
   --system            install missing pacman packages without asking
   --uninstall         remove app + venv (asks about config/cache/models)
   --purge             with --uninstall: wipe config + cache + models + logs
@@ -338,6 +342,7 @@ INTERACTIVE_MENU=1
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --extras)            need_value "$@"; EXTRAS="$2"; INTERACTIVE_MENU=0; shift 2 ;;
+        --user)              INSTALL_MODE=user; shift ;;
         --offline-packs)     OFFLINE_PACKS=yes; INTERACTIVE_MENU=0; shift ;;
         --no-offline-packs)  OFFLINE_PACKS=no; INTERACTIVE_MENU=0; shift ;;
         --bergamot)          need_value "$@"; BERGAMOT=yes; BERGAMOT_PAIRS="$2"; INTERACTIVE_MENU=0; shift 2 ;;
@@ -346,7 +351,7 @@ while [[ $# -gt 0 ]]; do
         --update)            UPDATE=1; INTERACTIVE_MENU=0; shift ;;
         --meiki)             MEIKI=yes; INTERACTIVE_MENU=0; shift ;;
         --no-meiki)          MEIKI=no; INTERACTIVE_MENU=0; shift ;;
-        --prefix)            need_value "$@"; PREFIX="$2"; shift 2 ;;
+        --prefix)            need_value "$@"; PREFIX="$2"; PREFIX_SET=1; shift 2 ;;
         --system)            WITH_SYSTEM=yes; INTERACTIVE_MENU=0; shift ;;
         --yes|-y)
             # Defaults only for unset knobs — later/earlier --no-offline-packs
@@ -355,7 +360,7 @@ while [[ $# -gt 0 ]]; do
             INTERACTIVE_MENU=0
             [[ "$WITH_SYSTEM" == ask ]] && WITH_SYSTEM=yes
             # Games path: Meiki on; online translate works without HF packs.
-            [[ "$MEIKI" == ask ]] && MEIKI=yes
+            [[ "$MEIKI" == ask ]] && MEIKI=no
             [[ "$OFFLINE_PACKS" == ask ]] && OFFLINE_PACKS=no
             [[ "$BERGAMOT" == ask ]] && BERGAMOT=no
             [[ "$PADDLE" == ask ]] && PADDLE=no
@@ -428,7 +433,7 @@ if [[ -r /etc/os-release ]]; then
 fi
 
 # --update: the choices of the last install, no questions.
-if ((UPDATE)); then
+if ((UPDATE)) && [[ "$INSTALL_MODE" == user ]]; then
     if [[ ! -r "$STATE_DIR/install-options" ]]; then
         err "нет сохранённых опций ($STATE_DIR/install-options): сначала обычная установка ./install.sh"
         exit 1
@@ -591,6 +596,13 @@ do_uninstall() {
         "$BIN_DIR/kizurium-translator" --stop 2>/dev/null || true
     elif have kizurium-translator; then
         kizurium-translator --stop 2>/dev/null || true
+    fi
+
+    if [[ "$INSTALL_MODE" == package ]] && have pacman && pacman -Q kizurium-translator >/dev/null 2>&1; then
+        local -a remove_args=(-R kizurium-translator)
+        if ((ASSUME_YES)) || ! is_tty; then remove_args+=(--noconfirm); fi
+        sudo pacman "${remove_args[@]}"
+        ok "пакет удалён через pacman"
     fi
 
     if [[ -e "$BIN_DIR/kizurium-translator" || -L "$BIN_DIR/kizurium-translator" ]]; then
@@ -807,6 +819,16 @@ if ((INTERACTIVE_MENU)) && is_tty && ((ASSUME_YES == 0)); then
                 ;;
             install)
                 # «Назад в меню» → checklist fails → loop, not exit.
+                if [[ "$INSTALL_MODE" == package ]]; then
+                    if ! checklist \
+                        "system|1|Зависимости Arch-пакета (pacman); приложение включает RapidOCR" \
+                        "bergamot|0|Bergamot: локальная модель en→ru из репозитория Mozilla"; then
+                        continue
+                    fi
+                    if checklist_has system; then WITH_SYSTEM=yes; else WITH_SYSTEM=no; fi
+                    if checklist_has bergamot; then BERGAMOT=yes; BERGAMOT_PAIRS="${BERGAMOT_PAIRS:-en-ru}"; else BERGAMOT=no; fi
+                    break
+                fi
                 if ! checklist \
                     "system|1|Системные пакеты (gtk4-layer-shell, tesseract, GStreamer/PipeWire для захвата …)" \
                     "meiki|1|Meiki OCR — японские игры" \
@@ -972,6 +994,82 @@ if [[ "$DISTRO" != arch ]] && ! have pacman; then
     exit 1
 fi
 
+# Build as the invoking user; only dependency installation and pacman -U
+# require privilege. Never source PKGBUILD as root.
+install_arch_package() {
+    step "Arch-пакет (pacman)"
+    if ((PREFIX_SET)); then
+        err "--prefix доступен только с --user; Arch-пакет устанавливается в /usr."
+        exit 2
+    fi
+    if [[ "$OFFLINE_PACKS" == yes || "$MEIKI" == yes || "$PADDLE" == yes || -n "$EXTRAS" ]]; then
+        err "Meiki, PaddleOCR и Python extras требуют режима --user."
+        err "Повторите ту же команду с --user, либо уберите дополнительные компоненты для установки Arch-пакета."
+        exit 2
+    fi
+    if ((EUID == 0)); then
+        err "Запустите ./install.sh обычным пользователем: makepkg не работает от root."
+        exit 1
+    fi
+    local -a build_deps=(base-devel python-build python-installer python-hatchling rust maturin "${SYS_PKGS[@]}")
+    [[ "$BERGAMOT" == yes ]] && build_deps+=(uv)
+    local -a missing_build=() make_args=(--force)
+    local dep package_file
+    for dep in "${build_deps[@]}"; do
+        pacman -Q "$dep" >/dev/null 2>&1 || missing_build+=("$dep")
+    done
+    if ((${#missing_build[@]})); then
+        if [[ "$WITH_SYSTEM" == no ]]; then
+            err "Не хватает зависимостей: ${missing_build[*]}"
+            exit 1
+        fi
+        pacman_install "${missing_build[@]}"
+    fi
+    [[ "$WITH_SYSTEM" == no ]] || make_args+=(--syncdeps)
+    if ((ASSUME_YES)) || ! is_tty; then make_args+=(--noconfirm); fi
+    # Absolute paths work even when the checkout has spaces. makepkg's output
+    # list, rather than a wildcard, selects the archive built by this recipe.
+    (cd "$REPO_DIR" && makepkg "${make_args[@]}")
+    local -a archives=()
+    mapfile -t archives < <(cd "$REPO_DIR" && makepkg --packagelist)
+    if ((${#archives[@]} != 1)) || [[ ! -f "${archives[0]}" ]]; then
+        err "makepkg не создал единственный ожидаемый архив пакета"
+        exit 1
+    fi
+    package_file="${archives[0]}"
+    local -a install_args=(-U)
+    if ((ASSUME_YES)) || ! is_tty; then install_args+=(--noconfirm); fi
+    sudo pacman "${install_args[@]}" -- "$package_file"
+    pacman -Q kizurium-translator
+
+    # Migrate only our generated launcher; keep unrelated user commands.
+    if [[ -f "$BIN_DIR/kizurium-translator" ]] &&
+       grep -qF '# Generated by kizurium-translator install.sh' "$BIN_DIR/kizurium-translator"; then
+        rm -f -- "$BIN_DIR/kizurium-translator"
+    fi
+    local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+    local desktop_file="$data_home/applications/kizurium-translator.desktop"
+    if [[ -f "$desktop_file" ]] && grep -qF "$BIN_DIR/kizurium-translator" "$desktop_file"; then
+        rm -f -- "$desktop_file"
+    fi
+    hash -r
+    if [[ "$BERGAMOT" == yes ]]; then
+        /usr/bin/kizurium-translator --bergamot-runtime-install || warn "Bergamot: повторите установку runtime из настроек"
+        for dep in $BERGAMOT_PAIRS; do
+            /usr/bin/kizurium-translator --bergamot-install "$dep" || warn "Bergamot $dep: повторите установку из настроек"
+        done
+    fi
+    /usr/bin/kizurium-translator --doctor || warn "doctor нашёл проблемы — см. вывод выше"
+    ok "Установлено: /usr/bin/kizurium-translator (pacman -Qi kizurium-translator)"
+    print_hotkey_hint
+    echo "  Обновить: ./install.sh --update; удалить: ./install.sh --uninstall"
+    exit 0
+}
+
+if [[ "$INSTALL_MODE" == package ]]; then
+    install_arch_package
+fi
+
 # Defaults if flags left knobs on "ask" (non-interactive partial flags).
 if ((INSTALL_OPTS_SET == 0)); then
     [[ "$WITH_SYSTEM" == ask ]] && WITH_SYSTEM=yes
@@ -1133,6 +1231,19 @@ mv -f -- "$launcher" "$BIN_DIR/kizurium-translator"
 ok "команда: $BIN_DIR/kizurium-translator"
 
 ensure_path
+
+step "Нативные ускорения Rust"
+if have cargo; then
+    # The app remains usable if this optional build fails. No compiler or
+    # prebuilt native code is downloaded by the application at runtime.
+    if uv pip install --python "$VENV_DIR/bin/python" "$REPO_DIR/native"; then
+        ok "Rust: статистика кадров, связные области и диапазон чернил"
+    else
+        warn "Rust-модуль не собран; приложение использует Python-реализацию"
+    fi
+else
+    warn "нет cargo — используется Python. Для ускорения установите Rust и повторите --user --update"
+fi
 
 if [[ -f "$CONFIG_DIR/config.toml" ]]; then
     ok "конфиг: $CONFIG_DIR/config.toml"
