@@ -171,6 +171,8 @@ kizurium-translator --live "0,0 1920x1080"
 
 The Arch package includes the components required by Kizurium for OCR and normal operation. Manual installation uses the required Wayland/GTK system packages together with the project's Python dependencies.
 
+The optional Rust library `kizurium-native` (Rust + PyO3, in `native/`) speeds up three helper computations: tile statistics, frame-change analysis and ink-row span detection. Building it is not required: without it the Python implementation runs with the same results. Set `KIZURIUM_NATIVE=0` to disable it. See [`native/README.md`](native/README.md) and [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 <details>
 <summary>Main dependencies</summary>
 
@@ -254,6 +256,7 @@ Without a profile, Kizurium stays in general-purpose mode.
 | Document | Contents |
 |---|---|
 | [`docs/install.md`](docs/install.md) | installation, setup, and hotkeys |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | architecture, data flow, and the Python/native boundary |
 | [`docs/trust.md`](docs/trust.md) | privacy and network requests |
 | [`docs/layout-families.md`](docs/layout-families.md) | distinguishing dialogue lines from buttons and other UI text |
 | [`docs/external-dictionaries.md`](docs/external-dictionaries.md) | external dictionary formats |

@@ -4,6 +4,9 @@ This separate maturin/PyO3 package exposes three kernels. The main application
 remains a Python/hatchling package and runs without it. Arch packages include
 the native wheel; `install.sh --user` builds it when Cargo is available.
 
+For how these kernels fit into the rest of the application and where the
+Python/native boundary lies, see [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+
 - `tile_reductions`: row-major `(mean, fraction_over_threshold)` tiles.
 - `outside_change_features`: local 3×3 contrast, four-neighbor connected components,
   edge density and dirty tile count for a supplied change mask.
